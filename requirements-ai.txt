@@ -1,0 +1,9 @@
+# Optional local AI-assistance stack. Torch itself is intentionally omitted:
+# install the CUDA/CPU build that matches the target computer first.
+numpy>=1.26,<2
+pillow>=11.1,<12
+huggingface-hub>=1.3,<2
+transformers>=5.1,<6
+# SAM2/SAM3 source is installed by scripts/install_jotmark.sh only when the
+# corresponding module is missing. Override SAM2_SOURCE / SAM3_SOURCE to use
+# a local source checkout instead of GitHub.

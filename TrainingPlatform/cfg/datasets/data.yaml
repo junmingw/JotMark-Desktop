@@ -1,0 +1,12 @@
+# Train and Val data path
+train: E:/11-AI/标注工具/1_github/fenge/images/train
+val: E:/11-AI/标注工具/1_github/fenge/images/val
+test: # test images (optional)
+
+# Number of classes
+nc: 2
+
+# Class names
+names:
+  0: dog
+  1: cat

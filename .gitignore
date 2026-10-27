@@ -1,0 +1,14 @@
+# Large model weights
+weights/sam_weights/sam3.pt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,16 @@
+# Train and Val data path
+train: E:/11-AI/标注工具/1_github/fenge/images/train
+val: E:/11-AI/标注工具/1_github/fenge/images/val
+test: # test images (optional)
+
+# Number of classes
+nc: 2
+
+# Class names
+names:
+  0: dog
+  1: cat
+
+# Keypoints
+kpt_shape: [17, 3]
+flip_idx: [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]
