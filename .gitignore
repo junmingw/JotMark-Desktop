@@ -1,5 +1,11 @@
-# Large model weights
-weights/sam_weights/sam3.pt
+# Local model weights and model source checkouts
+weights/
+.vendor/
+
+# Local environments and runtime state
+.venv-jotmark/
+.venv-labelpaw/
+.runtime/
 
 # Python
 __pycache__/
@@ -12,3 +18,7 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# Training outputs and local datasets
+runs/
+datasets/
