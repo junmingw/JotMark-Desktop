@@ -2,6 +2,12 @@ import sys
 import os
 import shutil
 from datetime import datetime
+from contextlib import nullcontext
+
+
+# Evaluate this before importing optional AI/training modules.  The manual
+# deployment uses only PySide6, OpenCV, NumPy and Pillow.
+MANUAL_ONLY = os.environ.get("JOTMARK_MANUAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
 
 # ============================================================
 # PyInstaller 打包运行环境资源路径适配
@@ -10,7 +16,12 @@ if getattr(sys, 'frozen', False):
     import multiprocessing
     multiprocessing.freeze_support()
 
-from TrainingPlatform.core.worker_runtime import dispatch_worker
+if MANUAL_ONLY:
+    # The lightweight distribution does not contain the training worker code.
+    def dispatch_worker():
+        return None
+else:
+    from TrainingPlatform.core.worker_runtime import dispatch_worker
 
 if __name__ == "__main__":
     worker_exit_code = dispatch_worker()
@@ -35,27 +46,41 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QInputDial
     QCheckBox, QListWidget, QFrame, QWidget
 from PySide6.QtCore import Qt, QPointF, QRectF, QThread, Signal, QSize, QEvent, QSettings, QTimer
 from PySide6.QtGui import QPainter, QIcon, QPixmap, QColor, QBrush, QAction, QActionGroup, QPolygonF, QMovie, QKeySequence, QShortcut, QPainterPathStroker
-from TrainingPlatform.ui.main_window import MainWindow as TrainingPlatformWindow
 import cv2
 import numpy as np
 from PIL import Image
-import torch
 from ui.main_window import Ui_MainWindow, TemplateSelectorWidget, FormatSelectorWidget
 from ui.template_dialog import SkeletonTemplateDialog
 from ui.model_selector_dialog import ModelSelectorDialog
 from ui.theme import DARK_THEME, LIGHT_THEME
 from jotmark.graphics.canvas import Canvas, CanvasMode, get_shape_scene_path
 from jotmark.graphics.geometry import mask_to_annotation_geometry, fit_obb_to_bounds, obb_corners
-from jotmark.models.sam_client import SAMClient, SAM_MODEL_MAP
 from jotmark.data.exporter import Exporter
 from jotmark.data.attribute_schema import ClassAttributeStore
 from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape
 from jotmark.config.pose_template import TemplateManager
 from utils.message import DialogOver
-from jotmark.models.yolo_predictor import YoloPredictorWorker
 from jotmark.config.paths import get_weights_base_dir
-from jotmark.config.runtime import inference_context, resolve_device
 from ui.attribute_widgets import AttributeSchemaDialog
+
+if MANUAL_ONLY:
+    from jotmark.models.manual_client import ManualAnnotationClient as SAMClient, SAM_MODEL_MAP
+
+    TrainingPlatformWindow = None
+    YoloPredictorWorker = None
+    torch = None
+
+    def resolve_device():
+        return "cpu"
+
+    def inference_context(_device):
+        return nullcontext()
+else:
+    from TrainingPlatform.ui.main_window import MainWindow as TrainingPlatformWindow
+    import torch
+    from jotmark.models.sam_client import SAMClient, SAM_MODEL_MAP
+    from jotmark.models.yolo_predictor import YoloPredictorWorker
+    from jotmark.config.runtime import inference_context, resolve_device
 
 
 # Keep the desktop file picker aligned with the online service and Pillow's
@@ -1053,6 +1078,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def __init__(self):
         super().__init__()
         self.setupUi(self)
+        self.manual_only = MANUAL_ONLY
 
         self.template_manager = TemplateManager()
 
@@ -1118,11 +1144,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self._connect_signals()
         self._set_mode(CanvasMode.EDIT)
         
-        # 初始化模型下拉菜单
-        self._init_model_selector()
-        
-        # 默认加载 SAM 3
-        self.on_model_selected("sam3")
+        if self.manual_only:
+            self._configure_manual_annotation_mode()
+        else:
+            # 只有发现本地模型权重时才尝试加载默认模型。
+            self._init_model_selector()
+            if "sam3" in SAM_MODEL_MAP:
+                self.on_model_selected("sam3")
+            elif SAM_MODEL_MAP:
+                self.on_model_selected(next(iter(SAM_MODEL_MAP)))
+            else:
+                self.update_model_status(False, "未发现辅助模型；可直接使用手动标注。")
         
         self.yolo_worker = None
 
@@ -1143,7 +1175,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # 初始化 samPromptBtn 样式与交互 (Gemini 3 Style)
         self.update_prompt_btn_icon()
         self.samPromptBtn.setEnabled(False)
-        self.samPromptBtn.show()
+        if not self.manual_only:
+            self.samPromptBtn.show()
         
         # 绑定文字变化信号以实现动态状态切换
         self.samPromptInput.textChanged.connect(self.on_prompt_text_changed)
@@ -1153,6 +1186,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         # 恢复上次关闭时的标注路径和图片
         self.restore_last_state()
+
+    def _configure_manual_annotation_mode(self):
+        """Hide AI/training controls in the lightweight manual deployment."""
+        self.scene.set_sam_enabled(False)
+        self.samSwitch.setChecked(False)
+        self.samWidget.hide()
+        self.btnSmartMode.hide()
+        self.btnModelSelector.hide()
+        self.btnPredict.hide()
+        self.btnClassFilter.hide()
+        self.btnMergeSam.hide()
+        self.samTextGroup.hide()
+        self.btnDatasetTool.hide()
+        self.helpLabel.setText("手工标注模式：无需模型、显卡或网络。")
+        self.helpLabel.setStyleSheet("color: #16A34A;")
 
     def update_prompt_btn_icon(self):
         from PySide6.QtCore import QSize
@@ -1221,6 +1269,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.btnModelSelector.clicked.connect(self._show_model_selector)
 
     def _show_model_selector(self):
+        if self.manual_only:
+            return
         dialog = ModelSelectorDialog(current_model_key=getattr(self.sam_client, 'current_model_key', None), is_dark_theme=self.is_dark_theme, parent=self)
         dialog.model_selected.connect(self.on_model_selected)
         
@@ -1230,6 +1280,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         dialog.exec()
 
     def on_model_selected(self, model_info_or_key):
+        if self.manual_only:
+            return
         if isinstance(model_info_or_key, str):
             key = model_info_or_key
             if key in SAM_MODEL_MAP:
@@ -2012,6 +2064,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.update_annotation_tree()
 
     def open_dataset_tool(self):
+        if self.manual_only or TrainingPlatformWindow is None:
+            DialogOver(self, "手工标注版未安装训练平台。", "当前版本", "info")
+            return
         try:
             if not hasattr(self, 'dataset_window') or self.dataset_window is None:
                 self.dataset_window = TrainingPlatformWindow()
@@ -2585,6 +2640,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.coordLabel.setText(f"坐标: X: {x}, Y: {y}")
 
     def on_sam_toggled(self, checked):
+        if self.manual_only:
+            if checked:
+                self.samSwitch.setChecked(False)
+            return
         if checked and self.scene.mode == CanvasMode.LINE:
             self.samSwitch.setChecked(False)
             self.statusBar.showMessage("折线标注不支持 SAM 智能提取，已切换为手动绘制", 4000)
@@ -2673,6 +2732,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self._set_mode(CanvasMode.POINT)
 
     def _set_mode(self, mode):
+        if self.manual_only and self.samSwitch.isChecked():
+            self.samSwitch.setChecked(False)
         if mode in (CanvasMode.LINE, CanvasMode.EDIT) and self.samSwitch.isChecked():
             self.samSwitch.setChecked(False)
         self.scene.set_mode(mode)
@@ -3795,7 +3856,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     break
 
         elif key == Qt.Key_Q:
-            self.samSwitch.setChecked(not self.samSwitch.isChecked())
+            if not self.manual_only:
+                self.samSwitch.setChecked(not self.samSwitch.isChecked())
         elif key == Qt.Key_F1:
             self.show_help_dialog()
         elif key == Qt.Key_R:

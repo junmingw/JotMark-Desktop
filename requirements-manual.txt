@@ -1,0 +1,7 @@
+# Lightweight dependencies for manual image annotation only.
+# This edition deliberately excludes PyTorch, SAM, YOLO and the training UI.
+# 6.6+ has wheels for current Ubuntu Python releases, including Python 3.12.
+pyside6>=6.6,<7
+numpy>=1.26,<2
+opencv-python~=4.11.0.86
+pillow>=11.1,<12

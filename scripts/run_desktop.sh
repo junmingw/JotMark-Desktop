@@ -21,7 +21,11 @@ fi
 
 if [[ ! -x "$ENV_DIR/bin/python" ]]; then
     echo "找不到 JotMark 环境：$ENV_DIR" >&2
-    echo "请先运行 scripts/install_jotmark.sh。" >&2
+    if [[ "${JOTMARK_MANUAL_ONLY:-}" == "1" ]]; then
+        echo "请先运行 scripts/install_manual_annotation.sh。" >&2
+    else
+        echo "请先运行 scripts/install_jotmark.sh。" >&2
+    fi
     exit 1
 fi
 
