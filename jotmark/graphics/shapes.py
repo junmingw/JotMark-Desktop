@@ -304,6 +304,7 @@ class RectShape(QGraphicsRectItem, BaseShape):
         super().__init__(rect)
         self.setup_style(self)
         self.label = label
+        self.attributes = {}
         self._updating_handles = False
         self._hovered = False
         self.lt_handle = self.rt_handle = self.lb_handle = self.rb_handle = None
@@ -611,6 +612,7 @@ class PoseShape(QGraphicsObject, BaseShape):
         super().__init__()
         self.is_temp = is_temp
         self.label = label
+        self.attributes = {}
         self.template = template
         
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemSendsGeometryChanges)
@@ -988,6 +990,7 @@ class PolyShape(QGraphicsPolygonItem, BaseShape):
     def __init__(self, polygon, label="", is_temp=False):
         super().__init__(polygon)
         self.label = label
+        self.attributes = {}
         self.is_temp = is_temp
         self.handles = []
         self._updating_handles = False
@@ -1202,6 +1205,7 @@ class PolylineShape(QGraphicsPathItem, BaseShape):
     def __init__(self, points, label="", is_temp=False):
         super().__init__()
         self.label = label
+        self.attributes = {}
         self.is_temp = is_temp
         self._points = QPolygonF(points)
         self.handles = []
@@ -1414,6 +1418,7 @@ class PointShape(QGraphicsEllipseItem, BaseShape):
             QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True)
         self.label = label
+        self.attributes = {}
 
         self.setup_label(self)
         if label:
@@ -1546,6 +1551,7 @@ class RotatedRectShape(QGraphicsObject, BaseShape):
         super().__init__()
         self.is_temp = is_temp
         self.label = label
+        self.attributes = {}
 
         # 用于区分“整体移动”和“手柄拉伸”
         self._is_resizing = False

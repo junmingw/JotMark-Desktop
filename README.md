@@ -145,9 +145,12 @@ cd /path/to/JotMark-Desktop
 ./scripts/run_desktop.sh
 ```
 
-启动脚本默认优先使用 `.venv-jotmark`，并会自动选择 CUDA（若 PyTorch 可用）或 CPU。可覆盖设备策略：
+启动脚本默认优先使用 `.venv-jotmark`；若它不存在，会依次兼容项目内的 `.venv-labelpaw` 和本机已验证的 `/home/nex/Documents/JotMark/.venv-labelpaw`。它会自动选择 CUDA（若 PyTorch 可用）或 CPU。可通过 `ENV_DIR` 和设备变量覆盖：
 
 ```bash
+# 明确使用已验证的兼容环境并启用 GPU
+ENV_DIR=/home/nex/Documents/JotMark/.venv-labelpaw JOTMARK_DEVICE=cuda ./scripts/run_desktop.sh
+
 # 自动选择，默认值
 JOTMARK_DEVICE=auto ./scripts/run_desktop.sh
 
@@ -182,7 +185,22 @@ dataset/
 └── data.yaml
 ```
 
-## 6. 常见问题
+## 6. 类别属性与子属性
+
+除类别外，JotMark 还支持为每个类别定义独立的属性树，并为每个标注实例分别填写属性值。
+
+1. 在右侧类别区域选中一个类别，点击 **属性**。
+2. 在弹窗中点击 **+ 属性** 新建顶层属性；选中一个属性后点击 **+ 子属性** 可无限层级添加子属性。
+3. 属性支持单选、多选、文本、数值和是/否；单选、多选的可选值每行填写一个。
+4. 选中画布中的一个标注，在右侧 **标注属性** 区填写值。父属性尚未填写时，其子属性不会显示。
+5. 在右侧 **标注属性** 区双击属性名称，可直接修改属性标签；该修改会应用到当前类别的全部标注，不会丢失已填写的属性值。
+6. 右侧顶部的 **类别标签** 是可编辑下拉框：可选择已有类别，也可直接输入新标签。更换类别会清空旧类别的实例属性，并加载新类别的属性表单。
+
+类别属性定义保存在数据集目录下的 `class_attributes.json`；每个标注实例的属性值保存在 JSON 标注中 shape 的 `attributes` 字段。旧 JSON 没有该字段时会作为空属性加载，保持兼容。
+
+YOLO 与 VOC XML 标准不支持任意属性字段，因此这两种格式只导出类别和几何信息；如需保留属性，请将 JSON 作为标注源文件。
+
+## 7. 常见问题
 
 | 现象 | 处理方式 |
 | --- | --- |
@@ -193,7 +211,7 @@ dataset/
 | `run_desktop.sh` 找不到环境 | 设置 `ENV_DIR=/实际/虚拟环境路径 ./scripts/run_desktop.sh`，或重新运行安装脚本。 |
 | GitHub 拒绝 push 大文件 | 模型权重不应提交。执行 `git rm --cached <权重文件>`，确认 `.gitignore` 生效后重新提交；发布模型请使用外部存储或 Git LFS。 |
 
-## 7. Git 与权重策略
+## 8. Git 与权重策略
 
 `weights/`、`.venv-jotmark/`、`.vendor/`、训练输出和运行时缓存均已写入 `.gitignore`。提交代码前建议检查：
 

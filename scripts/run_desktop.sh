@@ -5,11 +5,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_DIR="${ENV_DIR:-$ROOT/.venv-jotmark}"
 RUNTIME_DIR="${JOTMARK_RUNTIME_DIR:-${LABELPAW_RUNTIME_DIR:-$ROOT/.runtime}}"
 
-# Keep an existing pre-rename environment usable until the operator creates
-# the new .venv-jotmark environment with scripts/install_jotmark.sh.
-if [[ ! -x "$ENV_DIR/bin/python" && "$ENV_DIR" == "$ROOT/.venv-jotmark" && -x "$ROOT/.venv-labelpaw/bin/python" ]]; then
-    ENV_DIR="$ROOT/.venv-labelpaw"
-    echo "使用兼容环境：$ENV_DIR；建议后续运行 scripts/install_jotmark.sh 创建 .venv-jotmark。" >&2
+# Keep known pre-rename environments usable until the operator creates the
+# workspace-local .venv-jotmark environment.  An explicit ENV_DIR always wins.
+if [[ ! -x "$ENV_DIR/bin/python" && "$ENV_DIR" == "$ROOT/.venv-jotmark" ]]; then
+    for candidate in \
+        "$ROOT/.venv-labelpaw" \
+        "/home/nex/Documents/JotMark/.venv-labelpaw"; do
+        if [[ -x "$candidate/bin/python" ]]; then
+            ENV_DIR="$candidate"
+            echo "使用兼容环境：$ENV_DIR；建议后续运行 scripts/install_jotmark.sh 创建 .venv-jotmark。" >&2
+            break
+        fi
+    done
 fi
 
 if [[ ! -x "$ENV_DIR/bin/python" ]]; then

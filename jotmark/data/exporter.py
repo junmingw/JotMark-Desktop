@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+from copy import deepcopy
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape
@@ -8,6 +9,12 @@ from jotmark.graphics.geometry import fit_obb_to_bounds, obb_corners
 
 
 class Exporter:
+    @staticmethod
+    def _shape_attributes(item):
+        """Return JSON-safe per-instance values without sharing mutable state."""
+        attributes = getattr(item, "attributes", {})
+        return deepcopy(attributes) if isinstance(attributes, dict) else {}
+
     @staticmethod
     def _atomic_write_text(filepath, content):
         """Write a complete annotation file before replacing the old revision.
@@ -42,7 +49,8 @@ class Exporter:
                 shapes_data.append({
                     "label": item.label,
                     "type": "rectangle",
-                    "points": [[p1.x(), p1.y()], [p2.x(), p2.y()]]
+                    "points": [[p1.x(), p1.y()], [p2.x(), p2.y()]],
+                    "attributes": Exporter._shape_attributes(item),
                 })
             elif isinstance(item, PoseShape) and not getattr(item, 'is_temp', False):
                 # Export pose
@@ -58,7 +66,8 @@ class Exporter:
                     "angle": item.rotation(),
                     "keypoints": keypoints,
                     "kpt_shape": item.template.get("kpt_shape", [len(item.kps), 3]),
-                    "template_name": item.template.get("name", "Unknown")
+                    "template_name": item.template.get("name", "Unknown"),
+                    "attributes": Exporter._shape_attributes(item),
                 })
             elif isinstance(item, PolyShape) and not getattr(item, 'is_temp', False):
                 poly = item.polygon()
@@ -67,21 +76,24 @@ class Exporter:
                 shapes_data.append({
                     "label": item.label,
                     "type": "polygon",
-                    "points": points
+                    "points": points,
+                    "attributes": Exporter._shape_attributes(item),
                 })
             elif isinstance(item, PolylineShape) and not getattr(item, 'is_temp', False):
                 points = [[item.mapToScene(point).x(), item.mapToScene(point).y()] for point in item.polygon()]
                 shapes_data.append({
                     "label": item.label,
                     "type": "linestrip",
-                    "points": points
+                    "points": points,
+                    "attributes": Exporter._shape_attributes(item),
                 })
             elif isinstance(item, PointShape) and not getattr(item, 'is_temp', False):
                 rect = item.rect()
                 shapes_data.append({
                     "label": item.label,
                     "type": "point",
-                    "points": [[rect.center().x(), rect.center().y()]]
+                    "points": [[rect.center().x(), rect.center().y()]],
+                    "attributes": Exporter._shape_attributes(item),
                 })
             elif isinstance(item, RotatedRectShape) and not getattr(item, 'is_temp', False):
                 cx, cy, w, h, angle = fit_obb_to_bounds(
@@ -95,7 +107,8 @@ class Exporter:
                     "type": "obb",
                     "points": points,
                     "rect": [cx, cy, w, h],  # JSON 中保存: [中心X, 中心Y, 宽, 高]
-                    "angle": angle
+                    "angle": angle,
+                    "attributes": Exporter._shape_attributes(item),
                 })
         shapes_data.reverse()
         return shapes_data
@@ -117,7 +130,8 @@ class Exporter:
                 "points": s["points"],
                 "group_id": None,
                 "shape_type": shape_type,
-                "flags": {}
+                "flags": {},
+                "attributes": s.get("attributes", {}),
             }
             if shape_type == "obb":
                 shape_dict["angle"] = s.get("angle", 0)

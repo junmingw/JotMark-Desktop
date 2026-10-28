@@ -48,12 +48,14 @@ from jotmark.graphics.canvas import Canvas, CanvasMode, get_shape_scene_path
 from jotmark.graphics.geometry import mask_to_annotation_geometry, fit_obb_to_bounds, obb_corners
 from jotmark.models.sam_client import SAMClient, SAM_MODEL_MAP
 from jotmark.data.exporter import Exporter
+from jotmark.data.attribute_schema import ClassAttributeStore
 from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape
 from jotmark.config.pose_template import TemplateManager
 from utils.message import DialogOver
 from jotmark.models.yolo_predictor import YoloPredictorWorker
 from jotmark.config.paths import get_weights_base_dir
 from jotmark.config.runtime import inference_context, resolve_device
+from ui.attribute_widgets import AttributeSchemaDialog
 
 
 # Keep the desktop file picker aligned with the online service and Pillow's
@@ -204,7 +206,8 @@ class SamBatchWorker(QThread):
                                             "angle": s.get("angle", 0.0),
                                             "keypoints": s.get("keypoints", []),
                                             "kpt_shape": s.get("kpt_shape", []),
-                                            "template_name": s.get("template_name", "")
+                                            "template_name": s.get("template_name", ""),
+                                            "attributes": s.get("attributes", {}),
                                         })
                                 except Exception as e:
                                     print(f"加载已有 JSON 标注出错 {json_path}: {e}")
@@ -358,7 +361,8 @@ class YoloBatchPredictorWorker(QThread):
                                         "angle": s.get("angle", 0.0),
                                         "keypoints": s.get("keypoints", []),
                                         "kpt_shape": s.get("kpt_shape", []),
-                                        "template_name": s.get("template_name", "")
+                                        "template_name": s.get("template_name", ""),
+                                        "attributes": s.get("attributes", {}),
                                     })
                             except Exception as e:
                                 print(f"加载已有 JSON 标注出错 {json_path}: {e}")
@@ -1061,6 +1065,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.current_image_path = None
         self.current_dir = None
+        self.attribute_store = ClassAttributeStore()
         settings = QSettings("luohuabuxiema", "JotMark")
         self.annotation_output_dir = settings.value("annotation_output_dir", "") or ""
         self.class_list = []
@@ -1396,6 +1401,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.scene.state_changed.connect(self.auto_save_annotation)
         self.scene.selectionChanged.connect(self.enforce_sam_merge_selection)
         self.scene.selectionChanged.connect(self.sync_selection_to_tree)
+        self.scene.selectionChanged.connect(self.update_attribute_editor)
         self.scene.selectionChanged.connect(self.update_sam_merge_button)
         self.scene.canvas_item_hovered.connect(self.classListWidget.highlight_item_by_shape)
 
@@ -1407,6 +1413,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.classListWidget.color_changed.connect(self.on_class_color_changed)
         self.classListWidget.item_changed.connect(self.on_list_item_changed)
         self.classListWidget.shape_class_reassigned.connect(self.on_shape_class_reassigned)
+        self.classListWidget.manage_attributes_requested.connect(self.manage_class_attributes)
+        self.attributeEditor.attributes_changed.connect(self.on_shape_attributes_changed)
+        self.attributeEditor.attribute_label_edit_requested.connect(self.rename_attribute_label)
+        self.attributeEditor.class_label_changed.connect(self.on_shape_class_reassigned)
 
     def on_predict_clicked(self):
         if not getattr(self, 'current_yolo_predictor', None):
@@ -1728,6 +1738,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if old_name in self.class_list:
             idx = self.class_list.index(old_name)
             self.class_list[idx] = new_name
+            self.attribute_store.rename_class(old_name, new_name)
+            self.attribute_store.save()
             # 遍历画板更新形状标签
             changed = False
             for shape in self.scene.items():
@@ -1963,6 +1975,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     shape.update_lines()
 
             if shape:
+                saved_attributes = shape_data.get("attributes", {})
+                shape.attributes = dict(saved_attributes) if isinstance(saved_attributes, dict) else {}
                 self.scene.addItem(shape)
                 if hasattr(shape, 'update_label_text'):
                     shape.update_label_text(label)
@@ -2751,6 +2765,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.class_list.clear()
         self.classListWidget.load_classes(dir_path)
         self.class_list = self.classListWidget.get_class_list()
+        self.attribute_store.load(dir_path)
 
     def save_classes(self):
         if self.current_dir:
@@ -2848,11 +2863,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def on_shape_class_reassigned(self, shape, new_class_name):
         """当用户在右侧历史类别列表点击父类别时，将画布上已选中图形的类别修改为该类别"""
+        new_class_name = (new_class_name or "").strip()
+        if not new_class_name:
+            return
         old_label = getattr(shape, 'label', '')
         if old_label == new_class_name:
             return  # 类别未变化，无需操作
 
+        if new_class_name not in self.class_list:
+            self.add_class_to_list(new_class_name)
+            self.save_classes()
+
         shape.label = new_class_name
+        # Attribute values are class-scoped.  Carrying values from the old
+        # class into the new class would create invalid, hidden metadata.
+        shape.attributes = {}
         if hasattr(shape, 'update_label_text'):
             shape.update_label_text(new_class_name)
         if hasattr(shape, 'update_label_position'):
@@ -2863,7 +2888,132 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         # 更新标注树和保存
         self.update_annotation_tree()
-        self.auto_save_annotation()
+        self.update_attribute_editor()
+        self.scene.state_changed.emit()
+
+    def manage_class_attributes(self, class_name):
+        """Open the schema editor for the selected class."""
+        if not class_name:
+            DialogOver(self, "请先在右侧类别列表中选中一个类别。", "未选择类别", "warning")
+            return
+        dialog = AttributeSchemaDialog(class_name, self.attribute_store.attributes_for(class_name), self)
+        if dialog.exec() == QDialog.Accepted:
+            self.attribute_store.set_attributes(class_name, dialog.get_attributes())
+            self.attribute_store.save()
+            self._prune_removed_attribute_values(class_name)
+            self.update_attribute_editor()
+
+    def _selected_annotation_shapes(self):
+        shape_types = (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)
+        return [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, shape_types) and not getattr(item, "is_temp", False)
+        ]
+
+    def update_attribute_editor(self):
+        """Show values only for one annotation; every shape owns its values."""
+        selected_shapes = self._selected_annotation_shapes()
+        if len(selected_shapes) != 1:
+            hint = "请选择一个标注后编辑属性。" if not selected_shapes else "一次只能编辑一个标注的属性。"
+            self.attributeEditor.clear(hint)
+            return
+        shape = selected_shapes[0]
+        self.attributeEditor.set_annotation(
+            shape,
+            self.attribute_store.attributes_for(getattr(shape, "label", "")),
+            self.class_list,
+        )
+
+    def on_shape_attributes_changed(self, shape):
+        """Include property edits in autosave and undo/redo snapshots."""
+        if shape and shape.scene() is self.scene:
+            self.scene.state_changed.emit()
+
+    def rename_attribute_label(self, shape, attribute_id):
+        """Rename a schema node directly from the selected shape's right pane."""
+        class_name = getattr(shape, "label", "")
+        schema = self.attribute_store.attributes_for(class_name)
+
+        def find_node(nodes):
+            for node in nodes:
+                if node.get("id") == attribute_id:
+                    return node
+                found = find_node(node.get("children", []))
+                if found:
+                    return found
+            return None
+
+        node = find_node(schema)
+        if not node:
+            return
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "修改属性标签",
+            "属性标签：",
+            text=node.get("name", ""),
+        )
+        new_name = new_name.strip()
+        if not accepted or not new_name or new_name == node.get("name"):
+            return
+        node["name"] = new_name
+        self.attribute_store.set_attributes(class_name, schema)
+        self.attribute_store.save()
+        self.update_attribute_editor()
+
+    def _prune_removed_attribute_values(self, class_name):
+        """Remove values whose definitions were deleted from a class schema.
+
+        This keeps the schema and JSON payloads aligned, instead of leaving
+        invisible metadata behind after an attribute or subtree is removed.
+        """
+        valid_ids = self.attribute_store.attribute_ids_for(class_name)
+        changed_current = False
+        for shape in [
+            item for item in self.scene.items()
+            if isinstance(item, (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape))
+            and not getattr(item, "is_temp", False)
+            and getattr(item, "label", "") == class_name
+        ]:
+            attributes = getattr(shape, "attributes", {})
+            if not isinstance(attributes, dict):
+                shape.attributes = {}
+                changed_current = True
+                continue
+            filtered = {key: value for key, value in attributes.items() if key in valid_ids}
+            if filtered != attributes:
+                shape.attributes = filtered
+                changed_current = True
+
+        annotation_dir = self.annotation_output_dir or self.current_dir
+        if annotation_dir and os.path.isdir(annotation_dir):
+            import glob
+            for json_path in glob.glob(os.path.join(annotation_dir, "*.json")):
+                if os.path.basename(json_path) == "class_colors.json":
+                    continue
+                try:
+                    with open(json_path, "r", encoding="utf-8") as stream:
+                        data = json.load(stream)
+                    changed_file = False
+                    for shape_data in data.get("shapes", []):
+                        if shape_data.get("label") != class_name:
+                            continue
+                        attributes = shape_data.get("attributes", {})
+                        if not isinstance(attributes, dict):
+                            if "attributes" in shape_data:
+                                shape_data["attributes"] = {}
+                                changed_file = True
+                            continue
+                        filtered = {key: value for key, value in attributes.items() if key in valid_ids}
+                        if filtered != attributes:
+                            shape_data["attributes"] = filtered
+                            changed_file = True
+                    if changed_file:
+                        Exporter._atomic_write_text(json_path, json.dumps(data, ensure_ascii=False, indent=2))
+                except (OSError, ValueError, TypeError) as exc:
+                    print(f"清理已删除属性失败: {json_path}, {exc}")
+
+        if changed_current:
+            self.scene.state_changed.emit()
 
     def schedule_annotation_tree_refresh(self):
         """Merge repeated scene notifications into one tree refresh per event loop."""
@@ -3376,6 +3526,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                         continue
                 else:
                     continue
+                saved_attributes = shape_data.get("attributes", {})
+                shape.attributes = dict(saved_attributes) if isinstance(saved_attributes, dict) else {}
                 self._add_shape_to_scene(shape, label)
         except Exception as e:
             print(f"加载 JSON 标注失败: {e}")

@@ -314,6 +314,7 @@ class AnnotationTreeWidget(QWidget):
     color_changed = Signal(str, object)
     item_changed = Signal(object)  # 兼容旧 item_changed 信号
     shape_class_reassigned = Signal(object, str)  # (shape, new_class_name) 当点击父类别修改选中图形的类别
+    manage_attributes_requested = Signal(str)  # 当前类别；空字符串表示未选择类别
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -359,12 +360,18 @@ class AnnotationTreeWidget(QWidget):
         self.btnAdd.setCursor(Qt.PointingHandCursor)
         self.btnAdd.setToolTip("添加新类别")
 
+        self.btnAttributes = QPushButton("属性")
+        self.btnAttributes.setObjectName("classAttributesBtn")
+        self.btnAttributes.setCursor(Qt.PointingHandCursor)
+        self.btnAttributes.setToolTip("管理当前类别的属性和子属性")
+
         self.addInput = QLineEdit()
         self.addInput.setObjectName("classAddInput")
         self.addInput.setPlaceholderText("输入新类别名...")
 
         add_bar.addWidget(self.btnAdd)
         add_bar.addWidget(self.addInput, 1)
+        add_bar.addWidget(self.btnAttributes)
         layout.addLayout(add_bar)
 
         # 3. Tree Widget
@@ -386,6 +393,7 @@ class AnnotationTreeWidget(QWidget):
         self.searchInput.textChanged.connect(self._on_search_text_changed)
         self.addInput.returnPressed.connect(self._on_add_class)
         self.btnAdd.clicked.connect(self._on_add_class)
+        self.btnAttributes.clicked.connect(self._on_manage_attributes)
         self.treeWidget.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.treeWidget.itemDoubleClicked.connect(self._on_item_double_clicked)
 
@@ -457,6 +465,10 @@ class AnnotationTreeWidget(QWidget):
         self.add_class(text)
         self.addInput.clear()
         self.class_added.emit(text)
+
+    def _on_manage_attributes(self):
+        """Ask the main window to edit the schema for the selected class."""
+        self.manage_attributes_requested.emit(self.get_selected_class() or "")
 
     # ======================== 重命名 ========================
 

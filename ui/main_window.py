@@ -612,6 +612,16 @@ class Ui_MainWindow(object):
         classesLayout.addWidget(self.labelClasses)
         classesLayout.addWidget(self.classListWidget)
 
+        # Container for per-annotation attributes.  Definitions are configured
+        # from the class panel; values are edited only for the selected shape.
+        self.attributesContainer = QWidget()
+        self.attributesContainer.setObjectName("attributesContainer")
+        attributesLayout = QVBoxLayout(self.attributesContainer)
+        attributesLayout.setContentsMargins(0, 0, 0, 8)
+        from ui.attribute_widgets import AnnotationAttributeEditor
+        self.attributeEditor = AnnotationAttributeEditor()
+        attributesLayout.addWidget(self.attributeEditor)
+
         # Container for files
         self.filesContainer = QWidget()
         self.filesContainer.setObjectName("filesContainer")
@@ -706,11 +716,13 @@ class Ui_MainWindow(object):
 
         # Add both to splitter
         self.rightSplitter.addWidget(self.classesContainer)
+        self.rightSplitter.addWidget(self.attributesContainer)
         self.rightSplitter.addWidget(self.filesContainer)
         
         # Set initial stretch/sizes
         self.rightSplitter.setStretchFactor(0, 3)
         self.rightSplitter.setStretchFactor(1, 2)
+        self.rightSplitter.setStretchFactor(2, 2)
 
         self.dockLayout.addWidget(self.rightSplitter)
 
