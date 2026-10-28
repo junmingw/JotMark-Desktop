@@ -1414,6 +1414,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.classListWidget.item_changed.connect(self.on_list_item_changed)
         self.classListWidget.shape_class_reassigned.connect(self.on_shape_class_reassigned)
         self.classListWidget.manage_attributes_requested.connect(self.manage_class_attributes)
+        self.classListWidget.manage_global_attributes_requested.connect(self.manage_global_attributes)
+        self.classListWidget.annotation_shape_selected.connect(lambda _shape: self.update_attribute_editor())
         self.attributeEditor.attributes_changed.connect(self.on_shape_attributes_changed)
         self.attributeEditor.attribute_label_edit_requested.connect(self.rename_attribute_label)
         self.attributeEditor.class_label_changed.connect(self.on_shape_class_reassigned)
@@ -2903,6 +2905,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self._prune_removed_attribute_values(class_name)
             self.update_attribute_editor()
 
+    def manage_global_attributes(self):
+        """Edit attributes shown for annotations of every class."""
+        dialog = AttributeSchemaDialog("公共属性（全部类别）", self.attribute_store.global_attributes(), self)
+        if dialog.exec() == QDialog.Accepted:
+            self.attribute_store.set_global_attributes(dialog.get_attributes())
+            self.attribute_store.save()
+            self._prune_removed_attribute_values()
+            self.update_attribute_editor()
+
     def _selected_annotation_shapes(self):
         shape_types = (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)
         return [
@@ -2920,6 +2931,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         shape = selected_shapes[0]
         self.attributeEditor.set_annotation(
             shape,
+            self.attribute_store.global_attributes(),
             self.attribute_store.attributes_for(getattr(shape, "label", "")),
             self.class_list,
         )
@@ -2929,10 +2941,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if shape and shape.scene() is self.scene:
             self.scene.state_changed.emit()
 
-    def rename_attribute_label(self, shape, attribute_id):
+    def rename_attribute_label(self, shape, attribute_id, scope):
         """Rename a schema node directly from the selected shape's right pane."""
         class_name = getattr(shape, "label", "")
-        schema = self.attribute_store.attributes_for(class_name)
+        schema = (
+            self.attribute_store.global_attributes()
+            if scope == "global"
+            else self.attribute_store.attributes_for(class_name)
+        )
 
         def find_node(nodes):
             for node in nodes:
@@ -2956,29 +2972,32 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not accepted or not new_name or new_name == node.get("name"):
             return
         node["name"] = new_name
-        self.attribute_store.set_attributes(class_name, schema)
+        if scope == "global":
+            self.attribute_store.set_global_attributes(schema)
+        else:
+            self.attribute_store.set_attributes(class_name, schema)
         self.attribute_store.save()
         self.update_attribute_editor()
 
-    def _prune_removed_attribute_values(self, class_name):
+    def _prune_removed_attribute_values(self, class_name=None):
         """Remove values whose definitions were deleted from a class schema.
 
         This keeps the schema and JSON payloads aligned, instead of leaving
         invisible metadata behind after an attribute or subtree is removed.
         """
-        valid_ids = self.attribute_store.attribute_ids_for(class_name)
         changed_current = False
         for shape in [
             item for item in self.scene.items()
             if isinstance(item, (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape))
             and not getattr(item, "is_temp", False)
-            and getattr(item, "label", "") == class_name
+            and (class_name is None or getattr(item, "label", "") == class_name)
         ]:
             attributes = getattr(shape, "attributes", {})
             if not isinstance(attributes, dict):
                 shape.attributes = {}
                 changed_current = True
                 continue
+            valid_ids = self.attribute_store.attribute_ids_for(getattr(shape, "label", ""))
             filtered = {key: value for key, value in attributes.items() if key in valid_ids}
             if filtered != attributes:
                 shape.attributes = filtered
@@ -2995,7 +3014,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                         data = json.load(stream)
                     changed_file = False
                     for shape_data in data.get("shapes", []):
-                        if shape_data.get("label") != class_name:
+                        shape_label = shape_data.get("label", "")
+                        if class_name is not None and shape_label != class_name:
                             continue
                         attributes = shape_data.get("attributes", {})
                         if not isinstance(attributes, dict):
@@ -3003,6 +3023,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                                 shape_data["attributes"] = {}
                                 changed_file = True
                             continue
+                        valid_ids = self.attribute_store.attribute_ids_for(shape_label)
                         filtered = {key: value for key, value in attributes.items() if key in valid_ids}
                         if filtered != attributes:
                             shape_data["attributes"] = filtered

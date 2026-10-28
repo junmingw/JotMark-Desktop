@@ -37,6 +37,7 @@ class ClassAttributeStore:
 
     def __init__(self):
         self.directory = None
+        self._global = []
         self._classes = {}
 
     @property
@@ -47,6 +48,7 @@ class ClassAttributeStore:
 
     def load(self, directory: str | None):
         self.directory = directory
+        self._global = []
         self._classes = {}
         path = self.path
         if not path or not os.path.isfile(path):
@@ -55,15 +57,19 @@ class ClassAttributeStore:
             with open(path, "r", encoding="utf-8") as stream:
                 raw = json.load(stream)
             classes = raw.get("classes", {}) if isinstance(raw, dict) else {}
+            global_attributes = raw.get("global", []) if isinstance(raw, dict) else []
+            used_ids = set()
+            self._global = self._normalize_nodes(global_attributes, used_ids)
             if isinstance(classes, dict):
                 self._classes = {
-                    str(class_name): self._normalize_nodes(nodes)
+                    str(class_name): self._normalize_nodes(nodes, used_ids)
                     for class_name, nodes in classes.items()
                     if isinstance(nodes, list)
                 }
         except (OSError, ValueError, TypeError):
             # A malformed optional schema must never prevent the dataset itself
             # from opening.  The next explicit save writes a valid revision.
+            self._global = []
             self._classes = {}
 
     def save(self):
@@ -72,7 +78,8 @@ class ClassAttributeStore:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         data = {
-            "version": 1,
+            "version": 2,
+            "global": self._global,
             "classes": self._classes,
         }
         fd, temporary_path = tempfile.mkstemp(
@@ -95,16 +102,29 @@ class ClassAttributeStore:
     def attributes_for(self, class_name: str) -> list[dict]:
         return deepcopy(self._classes.get(class_name, []))
 
+    def global_attributes(self) -> list[dict]:
+        return deepcopy(self._global)
+
+    def set_global_attributes(self, nodes: list[dict]):
+        used_ids = set()
+        for class_nodes in self._classes.values():
+            used_ids.update(self._collect_ids(class_nodes))
+        self._global = self._normalize_nodes(nodes, used_ids)
+
     def set_attributes(self, class_name: str, nodes: list[dict]):
         if not class_name:
             return
-        normalized = self._normalize_nodes(nodes)
+        used_ids = self._collect_ids(self._global)
+        for other_class, class_nodes in self._classes.items():
+            if other_class != class_name:
+                used_ids.update(self._collect_ids(class_nodes))
+        normalized = self._normalize_nodes(nodes, used_ids)
         if normalized:
             self._classes[class_name] = normalized
         else:
             self._classes.pop(class_name, None)
 
-    def attribute_ids_for(self, class_name: str) -> set[str]:
+    def attribute_ids_for(self, class_name: str = "", include_global: bool = True) -> set[str]:
         """Return every schema node ID, including nested child attributes."""
         ids = set()
 
@@ -115,7 +135,19 @@ class ClassAttributeStore:
                     ids.add(node_id)
                 collect(node.get("children", []))
 
+        if include_global:
+            collect(self._global)
         collect(self._classes.get(class_name, []))
+        return ids
+
+    @staticmethod
+    def _collect_ids(nodes) -> set[str]:
+        ids = set()
+        for node in nodes:
+            node_id = node.get("id")
+            if node_id:
+                ids.add(node_id)
+            ids.update(ClassAttributeStore._collect_ids(node.get("children", [])))
         return ids
 
     def rename_class(self, old_name: str, new_name: str):

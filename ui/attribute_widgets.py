@@ -62,6 +62,192 @@ class EditableAttributeLabel(QLabel):
         super().mouseDoubleClickEvent(event)
 
 
+class AttributeValuePickerDialog(QDialog):
+    """Category-style searchable popup used for select and multi-select values."""
+
+    def __init__(self, title, options, value=None, multiple=False, parent=None):
+        super().__init__(parent)
+        self.multiple = multiple
+        self.setWindowTitle(title)
+        self.resize(300, 380)
+
+        layout = QVBoxLayout(self)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索属性值...")
+        self.search.setClearButtonEnabled(True)
+        layout.addWidget(self.search)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setObjectName("classListWidget")
+        self.list_widget.setSelectionMode(
+            QAbstractItemView.SingleSelection if not multiple else QAbstractItemView.NoSelection
+        )
+        selected = set(value if isinstance(value, list) else ([value] if value else []))
+        for option in options:
+            item = QListWidgetItem(option)
+            item.setData(Qt.UserRole, option)
+            if multiple:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if option in selected else Qt.Unchecked)
+            elif option in selected:
+                item.setSelected(True)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.clear_button = buttons.addButton("清除", QDialogButtonBox.ResetRole)
+        self.clear_button.clicked.connect(self._clear)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.search.textChanged.connect(self._filter)
+        if not multiple:
+            self.list_widget.itemDoubleClicked.connect(lambda _item: self.accept())
+
+    def _filter(self, text):
+        keyword = text.strip().lower()
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            item.setHidden(bool(keyword) and keyword not in item.text().lower())
+
+    def _clear(self):
+        self.list_widget.clearSelection()
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            if self.multiple:
+                item.setCheckState(Qt.Unchecked)
+        self.accept()
+
+    def value(self):
+        if self.multiple:
+            return [
+                self.list_widget.item(index).data(Qt.UserRole)
+                for index in range(self.list_widget.count())
+                if self.list_widget.item(index).checkState() == Qt.Checked
+            ]
+        current = self.list_widget.currentItem()
+        return current.data(Qt.UserRole) if current else ""
+
+
+class AttributeValuePickerButton(QPushButton):
+    """Compact current-value button which opens the full category-style picker."""
+
+    value_changed = Signal(object)
+
+    def __init__(self, title, options, value=None, multiple=False, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.options = list(options)
+        self.multiple = multiple
+        self.current_value = value if multiple else (value or "")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("点击选择或更换属性值")
+        self.setStyleSheet("""
+            QPushButton {
+                min-height: 28px;
+                padding: 4px 8px;
+                border: 1px solid #94A3B8;
+                border-radius: 5px;
+                background: transparent;
+                text-align: left;
+            }
+            QPushButton:hover { border-color: #3B82F6; background: rgba(59, 130, 246, 0.10); }
+        """)
+        self._refresh_text()
+        self.clicked.connect(self._open_picker)
+
+    def _refresh_text(self):
+        if self.multiple:
+            values = self.current_value if isinstance(self.current_value, list) else []
+            self.setText("、".join(values) if values else "未选择（可多选）")
+        else:
+            self.setText(self.current_value or "未选择")
+
+    def _open_picker(self):
+        dialog = AttributeValuePickerDialog(self.title, self.options, self.current_value, self.multiple, self)
+        if dialog.exec() == QDialog.Accepted:
+            self.current_value = dialog.value()
+            self._refresh_text()
+            self.value_changed.emit(self.current_value)
+
+
+class AttributeScopeDialog(QDialog):
+    """Popup list of all public or class-scoped properties for one annotation."""
+
+    def __init__(self, editor, scope, title, parent=None):
+        super().__init__(parent or editor)
+        self.editor = editor
+        self.scope = scope
+        self.setWindowTitle(title)
+        self.resize(380, 520)
+        self._refresh_scheduled = False
+
+        layout = QVBoxLayout(self)
+        hint = QLabel("点击属性当前值即可打开完整选项列表；双击属性名称可修改标签。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748B; font-size: 11px;")
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.content = QWidget()
+        self.form = QFormLayout(self.content)
+        self.form.setContentsMargins(4, 4, 4, 4)
+        self.form.setSpacing(8)
+        scroll.setWidget(self.content)
+        layout.addWidget(scroll, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self.editor.attributes_changed.connect(self._schedule_refresh)
+        self._rebuild()
+
+    def _clear_form(self):
+        while self.form.rowCount():
+            self.form.removeRow(0)
+
+    def _rebuild(self):
+        self._refresh_scheduled = False
+        self._clear_form()
+        nodes = self.editor._schemas.get(self.scope, [])
+        if not nodes:
+            self.form.addRow(QLabel("当前没有可用属性。"))
+            return
+        self._add_nodes(nodes)
+
+    def _add_nodes(self, nodes, depth=0):
+        values = self.editor._shape.attributes if self.editor._shape else {}
+        for node in nodes:
+            node_id = node.get("id")
+            if not node_id:
+                continue
+            value = values.get(node_id)
+            label = EditableAttributeLabel(node_id, ("　" * depth) + node.get("name", "属性"))
+            label.edit_requested.connect(self.editor._request_label_edit)
+            widget = self.editor._make_value_widget(node, value, self.scope)
+            self.form.addRow(label, widget)
+            if self.editor._has_value(value):
+                self._add_nodes(node.get("children", []), depth + 1)
+
+    def _schedule_refresh(self, _shape):
+        if self._refresh_scheduled or not self.isVisible():
+            return
+        self._refresh_scheduled = True
+        QTimer.singleShot(0, self._rebuild)
+
+    def closeEvent(self, event):
+        try:
+            self.editor.attributes_changed.disconnect(self._schedule_refresh)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
+
+
 class AttributeSchemaDialog(QDialog):
     """Edit one class's independent, nested attribute definition tree."""
 
@@ -76,7 +262,11 @@ class AttributeSchemaDialog(QDialog):
 
     def _build_ui(self, class_name):
         layout = QVBoxLayout(self)
-        title = QLabel(f"类别：{class_name}　属性定义仅影响“{class_name}”标注")
+        if class_name == "公共属性（全部类别）":
+            title_text = "公共属性会显示在全部类别的标注属性中。"
+        else:
+            title_text = f"类别：{class_name}　属性定义仅影响“{class_name}”标注"
+        title = QLabel(title_text)
         title.setStyleSheet("font-weight: 600;")
         layout.addWidget(title)
 
@@ -276,13 +466,13 @@ class AnnotationAttributeEditor(QWidget):
     """Render and edit values for the single annotation currently selected."""
 
     attributes_changed = Signal(object)
-    attribute_label_edit_requested = Signal(object, str)
+    attribute_label_edit_requested = Signal(object, str, str)
     class_label_changed = Signal(object, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._shape = None
-        self._schema = []
+        self._schemas = {"global": [], "class": []}
         self._building = False
         self._refresh_scheduled = False
         self._build_ui()
@@ -320,7 +510,7 @@ class AnnotationAttributeEditor(QWidget):
 
     def clear(self, hint="选中一个标注后，可填写该类别定义的属性。"):
         self._shape = None
-        self._schema = []
+        self._schemas = {"global": [], "class": []}
         self._building = True
         self.class_label_combo.clear()
         self.class_label_combo.setEnabled(False)
@@ -328,9 +518,12 @@ class AnnotationAttributeEditor(QWidget):
         self.hint.setText(hint)
         self._clear_form()
 
-    def set_annotation(self, shape, schema, class_labels=()):
+    def set_annotation(self, shape, global_schema, class_schema, class_labels=()):
         self._shape = shape
-        self._schema = schema or []
+        self._schemas = {
+            "global": global_schema or [],
+            "class": class_schema or [],
+        }
         if not hasattr(shape, "attributes") or not isinstance(shape.attributes, dict):
             shape.attributes = {}
         self._building = True
@@ -343,7 +536,7 @@ class AnnotationAttributeEditor(QWidget):
         self.class_label_combo.setCurrentText(current_label)
         self.class_label_combo.setEnabled(True)
         self._building = False
-        self.hint.setText("属性值仅属于当前选中的标注。父属性未填写时，子属性会隐藏。")
+        self.hint.setText("公共属性适用于全部类别；类别属性仅适用于当前类别。父属性未填写时，子属性会隐藏。")
         self._rebuild_form()
 
     def _clear_form(self):
@@ -362,15 +555,46 @@ class AnnotationAttributeEditor(QWidget):
         if not self._shape:
             self._building = False
             return
-        self._add_nodes(self._schema)
-        if not self._schema:
+        global_schema = self._schemas["global"]
+        class_schema = self._schemas["class"]
+        if global_schema:
+            self.form.addRow(self._scope_button("global", "公共属性（全部类别）", global_schema))
+        if class_schema:
+            self.form.addRow(self._scope_button("class", "类别属性（仅当前类别）", class_schema))
+        if not global_schema and not class_schema:
             note = QLabel("当前类别尚未配置属性。点击类别区域的“属性”进行配置。")
             note.setWordWrap(True)
             note.setStyleSheet("color: #64748B;")
             self.form.addRow(note)
         self._building = False
 
-    def _add_nodes(self, nodes, depth=0):
+    def _scope_button(self, scope, title, nodes):
+        values = self._shape.attributes if self._shape else {}
+        node_ids = list(self._descendant_ids(nodes))
+        selected_count = sum(1 for node_id in node_ids if self._has_value(values.get(node_id)))
+        button = QPushButton(f"{title}  ·  已填写 {selected_count}/{len(node_ids)} 项  ›")
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip("点击查看和修改该范围内的全部属性")
+        button.setStyleSheet("""
+            QPushButton {
+                min-height: 32px;
+                padding: 5px 9px;
+                border: 1px solid #94A3B8;
+                border-radius: 6px;
+                background: transparent;
+                font-weight: 600;
+                text-align: left;
+            }
+            QPushButton:hover { border-color: #3B82F6; background: rgba(59, 130, 246, 0.10); }
+        """)
+        button.clicked.connect(lambda: self._open_scope_dialog(scope, title))
+        return button
+
+    def _open_scope_dialog(self, scope, title):
+        dialog = AttributeScopeDialog(self, scope, title, self)
+        dialog.exec()
+
+    def _add_nodes(self, nodes, scope, depth=0):
         values = self._shape.attributes
         for node in nodes:
             node_id = node.get("id")
@@ -379,42 +603,56 @@ class AnnotationAttributeEditor(QWidget):
             value = values.get(node_id)
             label = EditableAttributeLabel(node_id, ("　" * depth) + node.get("name", "属性"))
             label.edit_requested.connect(self._request_label_edit)
-            widget = self._make_value_widget(node, value)
+            widget = self._make_value_widget(node, value, scope)
             self.form.addRow(label, widget)
             if self._has_value(value):
-                self._add_nodes(node.get("children", []), depth + 1)
+                self._add_nodes(node.get("children", []), scope, depth + 1)
 
-    def _make_value_widget(self, node, value):
+    def _make_value_widget(self, node, value, scope):
         node_id = node["id"]
         node_type = node.get("type", "single_select")
         if node_type == "single_select":
-            widget = QComboBox()
-            widget.addItem("未选择", "")
-            for option in node.get("options", []):
-                widget.addItem(option, option)
-            index = widget.findData(value)
-            widget.setCurrentIndex(index if index >= 0 else 0)
-            widget.currentIndexChanged.connect(lambda _index, key=node_id, w=widget: self._set_value(key, w.currentData()))
+            options = node.get("options", [])
+            if options:
+                widget = AttributeValuePickerButton(node.get("name", "属性"), options, value, multiple=False)
+                widget.value_changed.connect(
+                    lambda selected, key=node_id, current_scope=scope:
+                    self._set_value(key, selected, current_scope)
+                )
+            else:
+                # A newly-created select attribute has no choices yet.  Keep it
+                # usable by accepting a free value until choices are configured.
+                widget = QLineEdit(str(value) if value is not None else "")
+                widget.setPlaceholderText("请输入属性值（可在属性管理中配置选项）")
+                widget.editingFinished.connect(
+                    lambda key=node_id, current_scope=scope, w=widget:
+                    self._set_value(key, w.text().strip(), current_scope)
+                )
             return widget
         if node_type == "multi_select":
-            widget = QListWidget()
-            widget.setSelectionMode(QAbstractItemView.MultiSelection)
-            widget.setMaximumHeight(90)
-            selected = set(value if isinstance(value, list) else [])
-            for option in node.get("options", []):
-                item = QListWidgetItem(option)
-                item.setSelected(option in selected)
-                widget.addItem(item)
-            widget.itemSelectionChanged.connect(
-                lambda key=node_id, w=widget: self._set_value(
-                    key, [item.text() for item in w.selectedItems()]
+            if not node.get("options", []):
+                widget = QLineEdit(", ".join(value) if isinstance(value, list) else "")
+                widget.setPlaceholderText("多个值用逗号分隔（可在属性管理中配置选项）")
+                widget.editingFinished.connect(
+                    lambda key=node_id, current_scope=scope, w=widget: self._set_value(
+                        key,
+                        list(dict.fromkeys(part.strip() for part in w.text().split(",") if part.strip())),
+                        current_scope,
+                    )
                 )
+                return widget
+            widget = AttributeValuePickerButton(
+                node.get("name", "属性"), node.get("options", []), value, multiple=True
+            )
+            widget.value_changed.connect(
+                lambda selected, key=node_id, current_scope=scope:
+                self._set_value(key, selected, current_scope)
             )
             return widget
         if node_type == "boolean":
             widget = QCheckBox("是")
             widget.setChecked(bool(value))
-            widget.toggled.connect(lambda checked, key=node_id: self._set_value(key, checked))
+            widget.toggled.connect(lambda checked, key=node_id, current_scope=scope: self._set_value(key, checked, current_scope))
             return widget
         if node_type == "number":
             # A line edit keeps "not filled" distinct from 0, which a spin box
@@ -422,11 +660,15 @@ class AnnotationAttributeEditor(QWidget):
             widget = QLineEdit(str(value) if isinstance(value, (int, float)) else "")
             widget.setPlaceholderText("请输入数值")
             widget.setValidator(QDoubleValidator(-1_000_000_000, 1_000_000_000, 6, widget))
-            widget.editingFinished.connect(lambda key=node_id, w=widget: self._set_number_value(key, w.text()))
+            widget.editingFinished.connect(
+                lambda key=node_id, current_scope=scope, w=widget: self._set_number_value(key, w.text(), current_scope)
+            )
             return widget
 
         widget = QLineEdit(str(value) if value is not None else "")
-        widget.editingFinished.connect(lambda key=node_id, w=widget: self._set_value(key, w.text().strip()))
+        widget.editingFinished.connect(
+            lambda key=node_id, current_scope=scope, w=widget: self._set_value(key, w.text().strip(), current_scope)
+        )
         return widget
 
     def _descendant_ids(self, nodes):
@@ -434,21 +676,21 @@ class AnnotationAttributeEditor(QWidget):
             yield node.get("id")
             yield from self._descendant_ids(node.get("children", []))
 
-    def _find_node(self, node_id, nodes=None):
-        nodes = self._schema if nodes is None else nodes
+    def _find_node(self, node_id, scope, nodes=None):
+        nodes = self._schemas.get(scope, []) if nodes is None else nodes
         for node in nodes:
             if node.get("id") == node_id:
                 return node
-            found = self._find_node(node_id, node.get("children", []))
+            found = self._find_node(node_id, scope, node.get("children", []))
             if found:
                 return found
         return None
 
-    def _set_value(self, node_id, value):
+    def _set_value(self, node_id, value, scope):
         if self._building or not self._shape:
             return
         values = self._shape.attributes
-        node = self._find_node(node_id)
+        node = self._find_node(node_id, scope)
         previously_active = self._has_value(values.get(node_id))
         if value in (None, "", []):
             values.pop(node_id, None)
@@ -463,10 +705,15 @@ class AnnotationAttributeEditor(QWidget):
         # needed when a parent changes between empty and non-empty states.
         if node and node.get("children") and previously_active != self._has_value(values.get(node_id)):
             self._schedule_rebuild()
+        else:
+            self._schedule_summary_refresh()
 
     def _request_label_edit(self, node_id):
         if self._shape:
-            self.attribute_label_edit_requested.emit(self._shape, node_id)
+            for scope in ("global", "class"):
+                if self._find_node(node_id, scope):
+                    self.attribute_label_edit_requested.emit(self._shape, node_id, scope)
+                    return
 
     def _emit_class_label_change(self):
         if self._building or not self._shape:
@@ -475,19 +722,31 @@ class AnnotationAttributeEditor(QWidget):
         if new_label and new_label != getattr(self._shape, "label", ""):
             self.class_label_changed.emit(self._shape, new_label)
 
-    def _set_number_value(self, node_id, text):
+    def _set_number_value(self, node_id, text, scope):
         text = text.strip()
         if not text:
-            self._set_value(node_id, "")
+            self._set_value(node_id, "", scope)
             return
         try:
-            self._set_value(node_id, float(text))
+            self._set_value(node_id, float(text), scope)
         except ValueError:
             # QDoubleValidator normally prevents this path; retaining the
             # previous value is safer than coercing an invalid value to zero.
             return
 
     def _schedule_rebuild(self):
+        if self._refresh_scheduled:
+            return
+        self._refresh_scheduled = True
+
+        def rebuild():
+            self._refresh_scheduled = False
+            if self._shape:
+                self._rebuild_form()
+
+        QTimer.singleShot(0, rebuild)
+
+    def _schedule_summary_refresh(self):
         if self._refresh_scheduled:
             return
         self._refresh_scheduled = True

@@ -604,6 +604,7 @@ class Ui_MainWindow(object):
         # Container for classes
         self.classesContainer = QWidget()
         self.classesContainer.setObjectName("classesContainer")
+        self.classesContainer.setMinimumHeight(120)
         classesLayout = QVBoxLayout(self.classesContainer)
         classesLayout.setContentsMargins(0, 0, 0, 8)
         self.labelClasses = QLabel("历史类别:")
@@ -616,6 +617,7 @@ class Ui_MainWindow(object):
         # from the class panel; values are edited only for the selected shape.
         self.attributesContainer = QWidget()
         self.attributesContainer.setObjectName("attributesContainer")
+        self.attributesContainer.setMinimumHeight(120)
         attributesLayout = QVBoxLayout(self.attributesContainer)
         attributesLayout.setContentsMargins(0, 0, 0, 8)
         from ui.attribute_widgets import AnnotationAttributeEditor
@@ -625,6 +627,7 @@ class Ui_MainWindow(object):
         # Container for files
         self.filesContainer = QWidget()
         self.filesContainer.setObjectName("filesContainer")
+        self.filesContainer.setMinimumHeight(100)
         filesLayout = QVBoxLayout(self.filesContainer)
         filesLayout.setContentsMargins(0, 0, 0, 0)
         filesLayout.setSpacing(6)
@@ -719,10 +722,12 @@ class Ui_MainWindow(object):
         self.rightSplitter.addWidget(self.attributesContainer)
         self.rightSplitter.addWidget(self.filesContainer)
         
-        # Set initial stretch/sizes
-        self.rightSplitter.setStretchFactor(0, 3)
-        self.rightSplitter.setStretchFactor(1, 2)
-        self.rightSplitter.setStretchFactor(2, 2)
+        # Keep the category browser as the primary pane while reserving equal,
+        # practical space for annotation properties and the file list.
+        self.rightSplitter.setStretchFactor(0, 44)
+        self.rightSplitter.setStretchFactor(1, 28)
+        self.rightSplitter.setStretchFactor(2, 28)
+        self.rightSplitter.setSizes([316, 201, 201])
 
         self.dockLayout.addWidget(self.rightSplitter)
 

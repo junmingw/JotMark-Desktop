@@ -315,6 +315,8 @@ class AnnotationTreeWidget(QWidget):
     item_changed = Signal(object)  # 兼容旧 item_changed 信号
     shape_class_reassigned = Signal(object, str)  # (shape, new_class_name) 当点击父类别修改选中图形的类别
     manage_attributes_requested = Signal(str)  # 当前类别；空字符串表示未选择类别
+    manage_global_attributes_requested = Signal()
+    annotation_shape_selected = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -365,12 +367,18 @@ class AnnotationTreeWidget(QWidget):
         self.btnAttributes.setCursor(Qt.PointingHandCursor)
         self.btnAttributes.setToolTip("管理当前类别的属性和子属性")
 
+        self.btnGlobalAttributes = QPushButton("公共")
+        self.btnGlobalAttributes.setObjectName("classGlobalAttributesBtn")
+        self.btnGlobalAttributes.setCursor(Qt.PointingHandCursor)
+        self.btnGlobalAttributes.setToolTip("管理适用于全部类别的公共属性")
+
         self.addInput = QLineEdit()
         self.addInput.setObjectName("classAddInput")
         self.addInput.setPlaceholderText("输入新类别名...")
 
         add_bar.addWidget(self.btnAdd)
         add_bar.addWidget(self.addInput, 1)
+        add_bar.addWidget(self.btnGlobalAttributes)
         add_bar.addWidget(self.btnAttributes)
         layout.addLayout(add_bar)
 
@@ -394,6 +402,7 @@ class AnnotationTreeWidget(QWidget):
         self.addInput.returnPressed.connect(self._on_add_class)
         self.btnAdd.clicked.connect(self._on_add_class)
         self.btnAttributes.clicked.connect(self._on_manage_attributes)
+        self.btnGlobalAttributes.clicked.connect(self.manage_global_attributes_requested)
         self.treeWidget.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.treeWidget.itemDoubleClicked.connect(self._on_item_double_clicked)
 
@@ -562,6 +571,10 @@ class AnnotationTreeWidget(QWidget):
                 scene.blockSignals(False)
                 if merge_mode and hasattr(scene, 'selectionChanged'):
                     scene.selectionChanged.emit()
+                # Canvas signals are deliberately blocked above to avoid a
+                # tree/canvas feedback loop.  Notify the property panel
+                # explicitly so a tree-selected polygon still shows values.
+                self.annotation_shape_selected.emit(shape)
             else:
                 if any(getattr(widget, 'scene', None) and getattr(widget.scene(), 'merge_selection_mode', False)
                        for widget in QApplication.topLevelWidgets() if hasattr(widget, 'scene')):
