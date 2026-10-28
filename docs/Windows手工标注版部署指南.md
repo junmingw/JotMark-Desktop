@@ -14,7 +14,7 @@
 C:\JotMark-Desktop
 ```
 
-不要放在 U 盘、桌面同步盘、OneDrive 自动同步目录或路径特别长的位置。程序和图片数据也尽量避免中文、空格或特殊符号过多的路径。
+不要放在 U 盘、桌面同步盘或 OneDrive 自动同步目录中。程序和图片数据也尽量避免中文、空格或特殊符号过多的路径。新版安装脚本会把 Python 虚拟环境放在 `%LOCALAPPDATA%\JotMark\manual-venv` 的较短路径中，以规避 PySide6 的 Windows 长路径问题；但项目本身仍建议放在 `C:\JotMark-Desktop` 或 `E:\JotMark-Desktop` 这类简短路径。
 
 解压后的目录顶层应有两个 Windows 批处理文件：
 
@@ -90,10 +90,10 @@ py -3 --version
    - 先确认该 ZIP 确实来自可信发送者；
    - 点击“更多信息”；
    - 点击“仍要运行”。
-4. 出现黑色窗口后请等待，不要关闭。它会在项目目录中创建 `.venv-jotmark-manual` 文件夹并下载依赖。
+4. 出现黑色窗口后请等待，不要关闭。它会在当前用户的本地应用数据目录中创建 `JotMark\manual-venv` 环境并下载依赖，不会在项目目录中写入庞大的 Python 依赖。
 5. 看到 `Installation complete.` 后按任意键关闭窗口。
 
-若安装失败，先检查网络是否可用，再重新双击安装文件。请不要删除项目目录内刚创建的 `.venv-jotmark-manual`，除非需要完全重新安装。
+若安装失败，先检查网络是否可用，再重新双击安装文件。请不要删除 `%LOCALAPPDATA%\JotMark\manual-venv`，除非需要完全重新安装。
 
 ## 5. 每次启动
 
@@ -130,6 +130,16 @@ D:\AnnotationProjects\ProjectA\images
 ### 6.3 添加类别并绘制
 
 先在右侧最大的类别区域中建立类别，例如 `person`、`car`、`defect`，再选择左侧工具绘制。
+
+新建图片项目时，如果图片目录中还没有 `classes.txt`，程序会自动加载并保存默认的 `person`、`car`、`cyclist` 三个类别。默认模板位于项目目录：
+
+```text
+examples\classes.example.txt
+```
+
+该文件是普通 UTF-8 文本，一行一个类别；以 `#` 开头的行是说明，不会作为类别加载。可以复制它并按自己的项目改写，然后点击右侧类别区的 **导入**：未开始标注时可选择“替换当前类别”或“追加类别”；已经存在标注时只能追加，以避免 YOLO 类别编号错位。
+
+右键点击一个类别，可选择 **重命名类别**、**管理类别属性** 或 **删除类别及其全部标注**。删除需要二次确认：它会删除当前图片中该类别的全部标注、该类别专属属性，并同步清理当前标注输出目录中的 JSON、XML、YOLO 标注。YOLO 中排在其后的类别编号会自动前移；删除前请确认已备份数据。
 
 | 工具 | 操作 |
 | --- | --- |
@@ -177,6 +187,7 @@ D:\AnnotationProjects\ProjectA\images
 | 双击安装脚本后提示找不到 Python 或 `winget` | 从 Microsoft Store 安装/更新 **App Installer** 后重试；也可按第 3 节手动安装 Python。 |
 | 双击启动脚本提示未安装 | 先双击 `Install-JotMark-Manual-Windows.bat`，等待出现 `Installation complete.`。 |
 | 安装下载失败 | 检查网络、公司代理或安全软件；网络恢复后重新运行安装脚本即可。 |
+| 报错中出现 `Windows Long Path support`、`No such file or directory`，且路径很长 | 使用新版安装包；它会把依赖安装到 `%LOCALAPPDATA%\JotMark\manual-venv`。若仍使用旧包，请将项目重新解压到 `E:\JotMark-Desktop` 等短路径后再安装。 |
 | 想固定使用某个镜像 | 在 PowerShell 中先执行 `$env:JOTMARK_PIP_INDEX_URL='https://镜像地址/simple/'`，再运行安装命令；该设置只对当前 PowerShell 窗口有效。 |
 | 程序一闪而过或打不开 | 使用双击启动脚本，不要直接双击 `main.py`；保留黑色窗口并截图其中报错给维护者。 |
 | 提示 `DLL load failed` 或缺少运行库 | 在 Windows 设置中安装最新“Microsoft Visual C++ Redistributable x64”，然后重试。 |

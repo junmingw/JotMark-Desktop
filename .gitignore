@@ -22,3 +22,6 @@ venv/
 # Training outputs and local datasets
 runs/
 datasets/
+
+# Generated when the examples directory is opened as a working annotation project
+examples/classes.txt

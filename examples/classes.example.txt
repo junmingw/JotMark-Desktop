@@ -1,0 +1,5 @@
+# JotMark default class template
+# One category per line. Lines beginning with # are ignored.
+person
+car
+cyclist

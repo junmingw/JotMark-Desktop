@@ -87,6 +87,7 @@ else:
 # common image support.  TIFF/WebP are especially common in industrial data.
 SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tif', '.tiff', '.gif')
 ANNOTATION_EXTENSION_BY_FORMAT = {"json": ".json", "yolo": ".txt", "xml": ".xml"}
+DEFAULT_CLASS_TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples", "classes.example.txt")
 
 
 def annotation_base_path(image_path, annotation_output_dir=""):
@@ -1465,6 +1466,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.classListWidget.color_changed.connect(self.on_class_color_changed)
         self.classListWidget.item_changed.connect(self.on_list_item_changed)
         self.classListWidget.shape_class_reassigned.connect(self.on_shape_class_reassigned)
+        self.classListWidget.class_delete_requested.connect(self.delete_class_and_annotations)
+        self.classListWidget.class_file_import_requested.connect(self.import_class_file)
         self.classListWidget.manage_attributes_requested.connect(self.manage_class_attributes)
         self.classListWidget.manage_global_attributes_requested.connect(self.manage_global_attributes)
         self.classListWidget.annotation_shape_selected.connect(lambda _shape: self.update_attribute_editor())
@@ -1854,6 +1857,159 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.auto_save_annotation()
                 self.push_state()
             DialogOver(self, f"已将所有的 '{old_name}' 批量变更为 '{new_name}'", "修改成功", "success")
+
+    def _delete_class_from_saved_annotations(self, class_name, removed_class_index, annotation_dir):
+        """Delete one class from JSON, VOC XML and YOLO files in an output directory.
+
+        YOLO stores a class index rather than a class name, so labels after the
+        removed index are shifted down by one to stay aligned with classes.txt.
+        """
+        stats = {"json_shapes": 0, "xml_objects": 0, "yolo_lines": 0, "files": 0}
+        if not annotation_dir or not os.path.isdir(annotation_dir):
+            return stats
+
+        import glob
+        import xml.etree.ElementTree as ET
+
+        for json_file in glob.glob(os.path.join(annotation_dir, "*.json")):
+            if os.path.basename(json_file) in {"class_colors.json", "class_attributes.json"}:
+                continue
+            try:
+                with open(json_file, "r", encoding="utf-8") as stream:
+                    data = json.load(stream)
+                shapes = data.get("shapes") if isinstance(data, dict) else None
+                if not isinstance(shapes, list):
+                    continue
+                filtered = [shape for shape in shapes if shape.get("label") != class_name]
+                removed = len(shapes) - len(filtered)
+                if not removed:
+                    continue
+                data["shapes"] = filtered
+                Exporter._atomic_write_text(json_file, json.dumps(data, ensure_ascii=False, indent=2))
+                stats["json_shapes"] += removed
+                stats["files"] += 1
+            except Exception as exc:
+                print(f"删除 JSON 类别标注失败: {json_file}, {exc}")
+
+        for xml_file in glob.glob(os.path.join(annotation_dir, "*.xml")):
+            try:
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
+                removed = 0
+                for obj in list(root.findall("object")):
+                    if obj.findtext("name") == class_name:
+                        root.remove(obj)
+                        removed += 1
+                if not removed:
+                    continue
+                xml_text = '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
+                Exporter._atomic_write_text(xml_file, xml_text)
+                stats["xml_objects"] += removed
+                stats["files"] += 1
+            except Exception as exc:
+                print(f"删除 XML 类别标注失败: {xml_file}, {exc}")
+
+        for yolo_file in glob.glob(os.path.join(annotation_dir, "*.txt")):
+            if os.path.basename(yolo_file) == "classes.txt":
+                continue
+            try:
+                with open(yolo_file, "r", encoding="utf-8") as stream:
+                    source_lines = stream.read().splitlines()
+                target_lines = []
+                removed = 0
+                changed = False
+                for source_line in source_lines:
+                    parts = source_line.split()
+                    if not parts:
+                        continue
+                    try:
+                        class_id = int(parts[0])
+                    except ValueError:
+                        target_lines.append(source_line)
+                        continue
+                    if class_id == removed_class_index:
+                        removed += 1
+                        changed = True
+                        continue
+                    if class_id > removed_class_index:
+                        parts[0] = str(class_id - 1)
+                        target_lines.append(" ".join(parts))
+                        changed = True
+                    else:
+                        target_lines.append(source_line)
+                if not changed:
+                    continue
+                Exporter._atomic_write_text(yolo_file, "\n".join(target_lines))
+                stats["yolo_lines"] += removed
+                stats["files"] += 1
+            except Exception as exc:
+                print(f"删除 YOLO 类别标注失败: {yolo_file}, {exc}")
+        return stats
+
+    def delete_class_and_annotations(self, class_name):
+        """Delete a category, its schemas, and all matching annotations in scope."""
+        class_name = (class_name or "").strip()
+        if class_name not in self.class_list:
+            return
+
+        removed_class_index = self.class_list.index(class_name)
+        shape_types = (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)
+        shapes_to_remove = [
+            item for item in self.scene.items()
+            if isinstance(item, shape_types)
+            and not getattr(item, "is_temp", False)
+            and getattr(item, "label", "") == class_name
+        ]
+        annotation_dir = self.annotation_output_dir or self.current_dir
+        scope_text = (
+            f"\n\n还会删除“{annotation_dir}”内 JSON、XML、YOLO 文件中该类别的标注；"
+            "YOLO 中后续类别编号会自动前移。"
+            if annotation_dir else ""
+        )
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("删除类别及全部标注")
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setText(f"即将删除类别“{class_name}”。当前图片中有 {len(shapes_to_remove)} 个同类标注。")
+        dialog.setInformativeText(
+            f"该类别的专属属性定义也会删除。{scope_text}\n\n"
+            "此操作不能通过撤销恢复。请先按 Ctrl+S 保存当前工作，并备份图片、JSON、"
+            "class_attributes.json 后再继续。"
+        )
+        continue_button = dialog.addButton("我已备份，继续删除", QMessageBox.DestructiveRole)
+        dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() != continue_button:
+            return
+
+        disk_stats = self._delete_class_from_saved_annotations(
+            class_name, removed_class_index, annotation_dir
+        )
+        for shape in shapes_to_remove:
+            self.scene.removeItem(shape)
+
+        self.class_list.remove(class_name)
+        self.classListWidget.remove_class(class_name)
+        self.attribute_store.remove_class(class_name)
+        self.attribute_store.save()
+        self.save_classes()
+
+        # A class deletion also rewrites saved data outside the current canvas;
+        # local undo snapshots cannot safely restore those files or its schema.
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._undo_signatures.clear()
+        self._redo_signatures.clear()
+        self.update_undo_redo_buttons()
+        self.update_annotation_tree()
+        self.update_attribute_editor()
+        self.auto_save_annotation(immediate=True)
+
+        message = (
+            f"已删除类别“{class_name}”：当前图片 {len(shapes_to_remove)} 个标注，"
+            f"JSON {disk_stats['json_shapes']} 个，XML {disk_stats['xml_objects']} 个，"
+            f"YOLO {disk_stats['yolo_lines']} 行。"
+        )
+        DialogOver(self, message, "类别已删除", "success")
 
     def on_class_color_changed(self, cls_name, color):
         """类别颜色变更时，同步更新画布上所有该类别的形状颜色"""
@@ -2829,6 +2985,106 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.classListWidget.load_classes(dir_path)
         self.class_list = self.classListWidget.get_class_list()
         self.attribute_store.load(dir_path)
+        if not self.class_list:
+            default_classes = self._read_class_names(DEFAULT_CLASS_TEMPLATE_PATH)
+            if default_classes:
+                self._apply_class_names(default_classes, replace=False)
+                self.statusBar.showMessage(
+                    "新项目已加载默认类别：person、car、cyclist；可点击右侧“导入”替换或追加。",
+                    7000,
+                )
+
+    @staticmethod
+    def _read_class_names(file_path):
+        """Read a UTF-8 one-category-per-line template; # starts a comment."""
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as stream:
+                names = []
+                for line in stream:
+                    name = line.strip()
+                    if name and not name.startswith("#") and name not in names:
+                        names.append(name)
+                return names
+        except (OSError, UnicodeError):
+            return []
+
+    def _apply_class_names(self, class_names, replace=False):
+        """Append or replace category definitions without changing annotations."""
+        clean_names = []
+        for class_name in class_names:
+            class_name = str(class_name).strip()
+            if class_name and class_name not in clean_names:
+                clean_names.append(class_name)
+        if not clean_names:
+            return []
+
+        if replace:
+            for old_name in list(self.class_list):
+                self.attribute_store.remove_class(old_name)
+            self.class_list.clear()
+            self.classListWidget.clear_classes()
+            self.attribute_store.save()
+
+        added = []
+        for class_name in clean_names:
+            if class_name not in self.class_list:
+                self.add_class_to_list(class_name)
+                added.append(class_name)
+        self.save_classes()
+        self.update_annotation_tree()
+        if added:
+            item = self.classListWidget._class_items.get(added[0])
+            if item:
+                self.classListWidget.treeWidget.setCurrentItem(item)
+        return added
+
+    def import_class_file(self):
+        """Import a user-maintained TXT class template."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入类别文件",
+            self.current_dir or os.path.dirname(DEFAULT_CLASS_TEMPLATE_PATH),
+            "文本文件 (*.txt);;所有文件 (*)",
+        )
+        if not file_path:
+            return
+        class_names = self._read_class_names(file_path)
+        if not class_names:
+            DialogOver(self, "未读取到有效类别。类别文件应每行一个名称；以 # 开头的行会忽略。", "导入失败", "warning")
+            return
+
+        shape_types = (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)
+        has_annotations = any(
+            isinstance(item, shape_types) and not getattr(item, "is_temp", False)
+            for item in self.scene.items()
+        )
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("导入类别文件")
+        dialog.setIcon(QMessageBox.Question)
+        if has_annotations:
+            dialog.setText("当前图片已有标注。为避免类别编号与既有标注错位，只能追加新类别。")
+            append_button = dialog.addButton("追加类别", QMessageBox.AcceptRole)
+            dialog.addButton("取消", QMessageBox.RejectRole)
+            dialog.exec()
+            if dialog.clickedButton() != append_button:
+                return
+            replace = False
+        else:
+            dialog.setText("请选择导入方式。替换会移除当前类别及其专属属性定义。")
+            replace_button = dialog.addButton("替换当前类别", QMessageBox.DestructiveRole)
+            append_button = dialog.addButton("追加类别", QMessageBox.AcceptRole)
+            dialog.addButton("取消", QMessageBox.RejectRole)
+            dialog.exec()
+            if dialog.clickedButton() == replace_button:
+                replace = True
+            elif dialog.clickedButton() == append_button:
+                replace = False
+            else:
+                return
+
+        added = self._apply_class_names(class_names, replace=replace)
+        action = "替换" if replace else "追加"
+        DialogOver(self, f"已{action}类别文件：新增 {len(added)} 个类别。", "导入成功", "success")
 
     def save_classes(self):
         if self.current_dir:
@@ -2879,22 +3135,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if hasattr(shape, 'update_label_position'):
                 shape.update_label_position(shape)
             
-            from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, RotatedRectShape
-            is_rect_poly_obb = isinstance(shape, (RectShape, PolyShape, PolylineShape, RotatedRectShape))
-            
             if hasattr(shape, 'update_label_visibility'):
-                shape.update_label_visibility(shape, is_selected=(not is_rect_poly_obb), is_hovered=False)
+                shape.update_label_visibility(shape, is_selected=True, is_hovered=False)
             # 应用类别颜色
             if hasattr(shape, 'set_color'):
                 shape.set_color(self.classListWidget.get_class_color(cls_name))
                 
             for item in self.scene.selectedItems():
                 item.setSelected(False)
-                
-            if is_rect_poly_obb:
-                shape.setSelected(False)
-            else:
-                shape.setSelected(True)
+
+            # A newly created annotation is the one the user is working on:
+            # keep it selected so polygon/polyline vertices are visible and
+            # the right-side instance-attribute editor has a concrete shape.
+            shape.setSelected(True)
+            self.update_attribute_editor()
                 
             self.push_state()
             self.update_annotation_tree()
@@ -3658,11 +3912,27 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     kp_parts = parts[5:]
                     has_vis = (len(kp_parts) % 3 == 0)
                     kp_count = len(kp_parts) // 3 if has_vis else len(kp_parts) // 2
+
+                    # A YOLO pose line stores x, y, visibility triplets after
+                    # the box.  It must not depend on the currently selected
+                    # UI template: datasets can legitimately use a different
+                    # number of keypoints.  A segmentation polygon can have a
+                    # similar token count, so require every third value to be
+                    # a valid integral visibility state (0, 1 or 2).
+                    pose_visibility_values = []
+                    if has_vis and kp_count > 0:
+                        try:
+                            pose_visibility_values = [float(kp_parts[index]) for index in range(2, len(kp_parts), 3)]
+                        except ValueError:
+                            pose_visibility_values = []
+                    has_valid_pose_visibility = bool(pose_visibility_values) and all(
+                        value in (0.0, 1.0, 2.0) for value in pose_visibility_values
+                    )
                     
                     template = self.scene.current_pose_template
                     if template and len(template.get("keypoints", [])) == kp_count:
                         is_pose = True
-                    elif has_vis and len(parts) % 2 == 0: # 通常 Polygon 长度为奇数，如果有 visibility 导致长度为偶数且符合 3N，则肯定是 Pose
+                    elif has_valid_pose_visibility:
                         is_pose = True
                         
                     if is_pose:

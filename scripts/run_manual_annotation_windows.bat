@@ -3,7 +3,8 @@ setlocal EnableExtensions
 chcp 65001 >nul
 
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
-set "PYTHON=%ROOT%\.venv-jotmark-manual\Scripts\python.exe"
+if not defined JOTMARK_ENV_DIR set "JOTMARK_ENV_DIR=%LOCALAPPDATA%\JotMark\manual-venv"
+set "PYTHON=%JOTMARK_ENV_DIR%\Scripts\python.exe"
 
 if not exist "%PYTHON%" (
     echo.

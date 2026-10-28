@@ -5,13 +5,18 @@ chcp 65001 >nul
 rem Install the lightweight Windows edition.  It deliberately does not install
 rem PyTorch, SAM, YOLO, CUDA, model weights, or the training platform.
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
-set "ENV_DIR=%ROOT%\.venv-jotmark-manual"
+rem Keep third-party packages out of the project directory.  PySide6 contains
+rem deeply nested Qt files and can exceed the legacy Windows 260-character
+rem path limit when a ZIP was extracted into a long folder name.
+if not defined JOTMARK_ENV_DIR set "JOTMARK_ENV_DIR=%LOCALAPPDATA%\JotMark\manual-venv"
+set "ENV_DIR=%JOTMARK_ENV_DIR%"
 set "PYTHON=%ENV_DIR%\Scripts\python.exe"
 
 echo.
 echo ===============================================
 echo  JotMark Manual Annotation - Windows Installer
 echo ===============================================
+echo Python environment: %ENV_DIR%
 echo.
 
 if not exist "%PYTHON%" (

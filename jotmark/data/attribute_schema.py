@@ -156,6 +156,10 @@ class ClassAttributeStore:
         if old_name in self._classes:
             self._classes[new_name] = self._classes.pop(old_name)
 
+    def remove_class(self, class_name: str):
+        """Delete the attribute definition tree owned by one class."""
+        self._classes.pop(class_name, None)
+
     @classmethod
     def _normalize_nodes(cls, nodes, used_ids=None) -> list[dict]:
         used_ids = set() if used_ids is None else used_ids

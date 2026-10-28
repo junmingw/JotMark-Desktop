@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QTreeWidget, QTreeWidgetItem, QColorDialog, QLineEdit, QHBoxLayout,
-    QApplication, QStyle, QAbstractItemView
+    QApplication, QStyle, QAbstractItemView, QMenu
 )
 from PySide6.QtCore import Qt, Signal, QRect, QSize, QPoint
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QFont, QIcon, QPixmap
@@ -317,6 +317,8 @@ class AnnotationTreeWidget(QWidget):
     manage_attributes_requested = Signal(str)  # 当前类别；空字符串表示未选择类别
     manage_global_attributes_requested = Signal()
     annotation_shape_selected = Signal(object)
+    class_delete_requested = Signal(str)
+    class_file_import_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -372,12 +374,18 @@ class AnnotationTreeWidget(QWidget):
         self.btnGlobalAttributes.setCursor(Qt.PointingHandCursor)
         self.btnGlobalAttributes.setToolTip("管理适用于全部类别的公共属性")
 
+        self.btnImportClasses = QPushButton("导入")
+        self.btnImportClasses.setObjectName("classImportBtn")
+        self.btnImportClasses.setCursor(Qt.PointingHandCursor)
+        self.btnImportClasses.setToolTip("从 TXT 类别文件导入类别；每行一个类别")
+
         self.addInput = QLineEdit()
         self.addInput.setObjectName("classAddInput")
         self.addInput.setPlaceholderText("输入新类别名...")
 
         add_bar.addWidget(self.btnAdd)
         add_bar.addWidget(self.addInput, 1)
+        add_bar.addWidget(self.btnImportClasses)
         add_bar.addWidget(self.btnGlobalAttributes)
         add_bar.addWidget(self.btnAttributes)
         layout.addLayout(add_bar)
@@ -395,6 +403,7 @@ class AnnotationTreeWidget(QWidget):
         self.treeWidget.setDropIndicatorShown(True)
         self.treeWidget.setDragDropMode(QAbstractItemView.DragDrop)
         self.treeWidget.dropEvent = self._on_tree_drop_event
+        self.treeWidget.setContextMenuPolicy(Qt.CustomContextMenu)
         layout.addWidget(self.treeWidget, 1)
 
     def _connect_signals(self):
@@ -403,8 +412,10 @@ class AnnotationTreeWidget(QWidget):
         self.btnAdd.clicked.connect(self._on_add_class)
         self.btnAttributes.clicked.connect(self._on_manage_attributes)
         self.btnGlobalAttributes.clicked.connect(self.manage_global_attributes_requested)
+        self.btnImportClasses.clicked.connect(self.class_file_import_requested)
         self.treeWidget.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.treeWidget.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.treeWidget.customContextMenuRequested.connect(self._show_class_context_menu)
 
     def set_theme(self, is_dark):
         self.is_dark = is_dark
@@ -487,6 +498,31 @@ class AnnotationTreeWidget(QWidget):
             widget = self.treeWidget.itemWidget(item, 0)
             if isinstance(widget, ClassTreeItemWidget):
                 widget.start_edit()
+
+    def _show_class_context_menu(self, pos):
+        """Show destructive actions only for a top-level category."""
+        item = self.treeWidget.itemAt(pos)
+        if not item or item.parent():
+            return
+        class_name = (item.data(0, Qt.UserRole) or "").strip()
+        if not class_name:
+            return
+
+        menu = QMenu(self.treeWidget)
+        rename_action = menu.addAction("重命名类别")
+        attributes_action = menu.addAction("管理类别属性")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除类别及其全部标注")
+        action = menu.exec(self.treeWidget.viewport().mapToGlobal(pos))
+
+        if action == rename_action:
+            widget = self.treeWidget.itemWidget(item, 0)
+            if isinstance(widget, ClassTreeItemWidget):
+                widget.start_edit()
+        elif action == attributes_action:
+            self.manage_attributes_requested.emit(class_name)
+        elif action == delete_action:
+            self.class_delete_requested.emit(class_name)
 
     def rename_class_in_data(self, old_name, new_name):
         if old_name not in self._class_list:
@@ -576,12 +612,11 @@ class AnnotationTreeWidget(QWidget):
                 # explicitly so a tree-selected polygon still shows values.
                 self.annotation_shape_selected.emit(shape)
             else:
-                if any(getattr(widget, 'scene', None) and getattr(widget.scene(), 'merge_selection_mode', False)
+                if any(getattr(widget, 'scene', None) and getattr(widget.scene, 'merge_selection_mode', False)
                        for widget in QApplication.topLevelWidgets() if hasattr(widget, 'scene')):
                     return
                 # 点击的是父类别项：检查画布上是否有已选中的图形，如果有则将其类别修改为当前点击的类别
                 cls_name = item.data(0, Qt.UserRole)
-                from PySide6.QtWidgets import QApplication
                 from jotmark.graphics.shapes import BaseShape
                 for widget in QApplication.topLevelWidgets():
                     if hasattr(widget, 'scene') and widget.scene:
@@ -811,6 +846,12 @@ class AnnotationTreeWidget(QWidget):
         self._color_index = 0
         self.treeWidget.clear()
         self._class_items.clear()
+        # The QTreeWidget owns and destroys the child row widgets on clear().
+        # Keeping stale shape->item entries makes a later incremental refresh
+        # reattach an item without its custom widget, which appears as a blank
+        # annotation row beneath a category.
+        self._shape_items.clear()
+        self._hovered_tree_items.clear()
 
     def get_class_list(self):
         return list(self._class_list)
@@ -870,6 +911,14 @@ class AnnotationTreeWidget(QWidget):
 
                 for index, shape in enumerate(shapes_in_class):
                     child_item = self._shape_items.get(shape)
+                    # A category rebuild can invalidate the visual widget even
+                    # if a stale QTreeWidgetItem object still exists in Python.
+                    # Treat that mapping as absent and recreate a complete row.
+                    if child_item is not None:
+                        child_widget = self.treeWidget.itemWidget(child_item, 0)
+                        if child_item.parent() is None or not isinstance(child_widget, AnnotationTreeItemWidget):
+                            self._shape_items.pop(shape, None)
+                            child_item = None
                     if child_item is None:
                         child_item = QTreeWidgetItem()
                         child_item.setData(0, Qt.UserRole, shape)
@@ -983,11 +1032,13 @@ class AnnotationTreeWidget(QWidget):
         return new_icon
 
     def get_shape_info_text(self, idx, shape):
-        from jotmark.graphics.shapes import RectShape, PolyShape, RotatedRectShape, PoseShape, PointShape
+        from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, RotatedRectShape, PoseShape, PointShape
         if isinstance(shape, PoseShape):
             return f"{idx} {len(shape.kps)} 个关键点"
         elif isinstance(shape, PolyShape):
             return f"{idx} {shape.polygon().count()} 个点"
+        elif isinstance(shape, PolylineShape):
+            return f"polyline {idx}（{shape.polygon().count()} 个点）"
         elif isinstance(shape, RotatedRectShape):
             w = int(shape.box_w)
             h = int(shape.box_h)
