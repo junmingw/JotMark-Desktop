@@ -72,6 +72,40 @@ class ClassAttributeStore:
             self._global = []
             self._classes = {}
 
+    def replace_schema(self, raw) -> dict:
+        """Validate and replace schema definitions while retaining stable IDs.
+
+        This is used by the manual JSON import action.  It only changes the
+        definitions held by this store; existing annotation instance values
+        are deliberately not deleted here, so importing a new schema cannot
+        silently destroy historical JSON metadata.
+        """
+        if not isinstance(raw, dict):
+            raise ValueError("属性文件根节点必须是 JSON 对象。")
+        global_attributes = raw.get("global", [])
+        classes = raw.get("classes", {})
+        if not isinstance(global_attributes, list):
+            raise ValueError("属性文件中的 global 必须是数组。")
+        if not isinstance(classes, dict):
+            raise ValueError("属性文件中的 classes 必须是对象。")
+
+        used_ids = set()
+        normalized_global = self._normalize_nodes(global_attributes, used_ids)
+        normalized_classes = {}
+        for class_name, nodes in classes.items():
+            if not isinstance(nodes, list):
+                raise ValueError(f"类别“{class_name}”的属性必须是数组。")
+            clean_name = str(class_name).strip()
+            if clean_name:
+                normalized_classes[clean_name] = self._normalize_nodes(nodes, used_ids)
+
+        self._global = normalized_global
+        self._classes = normalized_classes
+        return {
+            "global_count": len(self._global),
+            "class_count": len(self._classes),
+        }
+
     def save(self):
         path = self.path
         if not path:

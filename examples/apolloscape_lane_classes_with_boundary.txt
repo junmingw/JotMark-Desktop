@@ -1,0 +1,42 @@
+# ApolloScape Lane：项目类别顺序。导入 JotMark 时，# 开头的行会被忽略。
+# 0=boundary；1-35 保持 ApolloScape 35 种道路标记的 TrainId；36=void；37=noise；38=ignore。
+# void/noise/ignore 为背景或忽略区域，通常不绘制；boundary 是道路边缘/路沿项目扩展类别。
+boundary
+s_w_d
+s_y_d
+ds_w_dn
+ds_y_dn
+sb_w_do
+sb_y_do
+b_w_g
+b_y_g
+db_w_g
+db_y_g
+db_w_s
+s_w_s
+ds_w_s
+s_w_c
+s_y_c
+s_w_p
+s_n_p
+c_wy_z
+a_w_u
+a_w_t
+a_w_tl
+a_w_tr
+a_w_tlr
+a_w_l
+a_w_r
+a_w_lr
+a_n_lu
+a_w_tu
+a_w_m
+a_y_t
+b_n_sr
+d_wy_za
+r_wy_np
+vom_wy_n
+om_n_n
+void
+noise
+ignore

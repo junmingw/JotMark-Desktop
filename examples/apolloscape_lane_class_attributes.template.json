@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "global": [
+    {
+      "id": "apolloscape_visibility",
+      "name": "visibility",
+      "type": "single_select",
+      "options": [
+        "visible",
+        "partly_occluded",
+        "uncertain"
+      ],
+      "children": []
+    },
+    {
+      "id": "apolloscape_source",
+      "name": "source",
+      "type": "single_select",
+      "options": [
+        "painted",
+        "faded",
+        "repaired"
+      ],
+      "children": []
+    },
+    {
+      "id": "apolloscape_review",
+      "name": "review",
+      "type": "single_select",
+      "options": [
+        "normal",
+        "need_review"
+      ],
+      "children": []
+    }
+  ],
+  "classes": {
+    "boundary": [
+      {
+        "id": "boundary_kind",
+        "name": "boundary_kind",
+        "type": "single_select",
+        "options": [
+          "road_edge",
+          "curb"
+        ],
+        "children": []
+      }
+    ]
+  }
+}

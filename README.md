@@ -8,6 +8,8 @@ JotMark 是一个本地图像标注与 YOLO 训练桌面工具。本仓库是从
 
 > 要为 Conditional Lane Detection / CondLaneNet 制作车道线训练数据，请使用顶部的 `CurveLanes / CondLaneNet 折线格式`；其 `.lines.txt` 导出和训练清单生成方式见 [CurveLanes-CondLaneNet 导出与训练说明](docs/CurveLanes-CondLaneNet导出与训练.md)。
 
+> 要标注 ApolloScape Lane 的 36 个官方 TrainId 类别并扩展英文 `boundary` 类别，请使用 [ApolloScape Lane 类别与 Boundary 标注规范](docs/ApolloScape_Lane类别与Boundary标注规范.md) 及对应的 [可导入类别文件](examples/apolloscape_lane_classes_with_boundary.txt)。
+
 ## 功能与模型范围
 
 | 模型 | 用途 | 可运行设备 | 权重发现规则 |
@@ -208,10 +210,25 @@ dataset/
 4. 选中画布中的一个标注后，右侧 **标注属性** 区会显示“公共属性”和“类别属性”按钮；点击任一按钮可弹出该范围内的完整属性列表。父属性尚未填写时，其子属性不会显示；未配置选项的单选/多选属性可直接输入值。
 5. 在右侧 **标注属性** 区双击属性名称，可直接修改属性标签；该修改会应用到当前类别的全部标注，不会丢失已填写的属性值。
 6. 右侧顶部的 **类别标签** 是可编辑下拉框：可选择已有类别，也可直接输入新标签。更换类别会清空旧类别的实例属性，并加载新类别的属性表单。
+7. 右侧类别区的 **属性导入** 可选择任意 `class_attributes.json` 模板并直接写入当前图片目录。导入会校验 JSON；如果当前已有属性配置，会先自动备份到 `.jotmark_backups/attribute-schema-import-时间戳/`，再要求确认替换。导入只替换属性定义，不会自动删除既有 JSON 标注中的属性值。
 
 类别属性定义保存在数据集目录下的 `class_attributes.json`；每个标注实例的属性值保存在 JSON 标注中 shape 的 `attributes` 字段。旧 JSON 没有该字段时会作为空属性加载，保持兼容。
 
+原有自动加载机制仍保留：打开图片目录时，只要同目录已有 `class_attributes.json`，JotMark 会自动读取它。手动导入只是将所选模板保存为当前项目的该文件，方便首次建项目或替换模板。
+
 YOLO 与 VOC XML 标准不支持任意属性字段，因此这两种格式只导出类别和几何信息；如需保留属性，请将 JSON 作为标注源文件。
+
+### 安全转换类别与属性
+
+右侧类别区的 **转换** 按钮（或右击类别后选择 **安全转换类别 / 属性**）提供三种只写入新目录的迁移：
+
+1. **类别 → 类别**：例如 `car` 合并为 `vehicle`。
+2. **属性 → 类别**：例如 `boundary` 的 `boundary_kind=curb`、`median` 分别变成 `boundary_curb`、`boundary_median`。
+3. **类别 → 属性**：例如 `boundary_curb` 变回 `boundary`，并写入 `boundary_kind=curb`。
+
+转换窗口会显示源目录、自动备份目录和新项目目录。开始后会先在源目录下创建 `.jotmark_backups/category-conversion-时间戳/` 的**完整快照**，再把转换后的完整项目写入一个尚不存在的新目录；源项目不会被改写。输出目录不能与源目录相同，也不能位于源目录内部。多选属性不能直接提升成单一类别，避免一个标注被错误拆成多个类别。
+
+也可脱离主界面单独启动转换工具：`python3 scripts/open_category_conversion.py /你的/源项目目录`。
 
 ## 7. 常见问题
 

@@ -157,8 +157,11 @@ from PIL import Image
 from PySide6.QtWidgets import QApplication
 import main
 from jotmark.data.exporter import Exporter
+from jotmark.data.attribute_schema import ClassAttributeStore
+from jotmark.data.category_conversion import convert_attribute_to_category
 from ui.annotation_tree_widget import AnnotationTreeWidget
 from ui.attribute_widgets import AttributeScopeDialog, BooleanValuePicker
+from ui.category_conversion_dialog import CategoryConversionDialog
 
 print("手工标注环境检查通过")
 print("PySide6、OpenCV、NumPy、Pillow 已安装")
@@ -168,7 +171,9 @@ assert hasattr(AnnotationTreeWidget, "show_class_context_menu_for_item"), "缺�
 assert hasattr(AnnotationTreeWidget, "show_annotation_context_menu_for_item"), "缺少标注右键改类菜单"
 assert BooleanValuePicker is not None, "缺少是/否属性选择控件"
 assert hasattr(AttributeScopeDialog, "_current_visibility_signature"), "缺少单选属性重复修改修复"
-print("手工模式、CurveLanes、右侧标注改类、属性选择检查通过")
+assert hasattr(ClassAttributeStore, "replace_schema"), "缺少属性 JSON 导入支持"
+assert CategoryConversionDialog is not None and callable(convert_attribute_to_category), "缺少类别/属性安全转换工具"
+print("手工模式、CurveLanes、右侧标注改类、属性导入与安全转换检查通过")
 PY
 
 echo

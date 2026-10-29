@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QTreeWidget, QTreeWidgetItem, QColorDialog, QLineEdit, QHBoxLayout,
-    QApplication, QStyle, QAbstractItemView, QMenu, QMessageBox
+    QApplication, QStyle, QAbstractItemView, QMenu, QMessageBox, QGridLayout
 )
 from PySide6.QtCore import Qt, Signal, QRect, QSize, QPoint
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QFont, QIcon, QPixmap
@@ -375,6 +375,8 @@ class AnnotationTreeWidget(QWidget):
     annotation_shape_selected = Signal(object)
     class_delete_requested = Signal(str)
     class_file_import_requested = Signal()
+    attribute_file_import_requested = Signal()
+    category_conversion_requested = Signal(str)  # 预填当前类别；可在转换窗口内重新选择
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -414,12 +416,12 @@ class AnnotationTreeWidget(QWidget):
         self.searchInput.setClearButtonEnabled(True)
         layout.addWidget(self.searchInput)
 
-        # 2. Category actions + a dedicated full-width name field.  Keeping
-        # the editor out of the crowded action row makes long English labels
-        # readable and editable instead of truncating them between buttons.
-        action_bar = QHBoxLayout()
-        action_bar.setContentsMargins(0, 0, 0, 0)
-        action_bar.setSpacing(4)
+        # 2. Category tools use two rows so every action remains readable in
+        # a narrow right sidebar.  Adding a class has its own input row below.
+        action_grid = QGridLayout()
+        action_grid.setContentsMargins(0, 0, 0, 0)
+        action_grid.setHorizontalSpacing(4)
+        action_grid.setVerticalSpacing(4)
 
         self.btnAdd = QPushButton("+")
         self.btnAdd.setObjectName("classAddBtn")
@@ -427,20 +429,30 @@ class AnnotationTreeWidget(QWidget):
         self.btnAdd.setCursor(Qt.PointingHandCursor)
         self.btnAdd.setToolTip("添加新类别")
 
-        self.btnAttributes = QPushButton("属性")
+        self.btnAttributes = QPushButton("类别属性")
         self.btnAttributes.setObjectName("classAttributesBtn")
         self.btnAttributes.setCursor(Qt.PointingHandCursor)
         self.btnAttributes.setToolTip("管理当前类别的属性和子属性")
 
-        self.btnGlobalAttributes = QPushButton("公共")
+        self.btnGlobalAttributes = QPushButton("公共属性")
         self.btnGlobalAttributes.setObjectName("classGlobalAttributesBtn")
         self.btnGlobalAttributes.setCursor(Qt.PointingHandCursor)
         self.btnGlobalAttributes.setToolTip("管理适用于全部类别的公共属性")
 
-        self.btnImportClasses = QPushButton("导入")
+        self.btnImportClasses = QPushButton("类别导入")
         self.btnImportClasses.setObjectName("classImportBtn")
         self.btnImportClasses.setCursor(Qt.PointingHandCursor)
         self.btnImportClasses.setToolTip("从 TXT 类别文件导入类别；每行一个类别")
+
+        self.btnImportAttributes = QPushButton("属性导入")
+        self.btnImportAttributes.setObjectName("attributeImportBtn")
+        self.btnImportAttributes.setCursor(Qt.PointingHandCursor)
+        self.btnImportAttributes.setToolTip("导入 class_attributes.json；原项目打开时的自动加载逻辑保持不变")
+
+        self.btnConvertCategories = QPushButton("安全转换")
+        self.btnConvertCategories.setObjectName("classConvertBtn")
+        self.btnConvertCategories.setCursor(Qt.PointingHandCursor)
+        self.btnConvertCategories.setToolTip("安全转换类别和属性：自动备份源项目，并输出到新目录")
 
         self.addInput = QLineEdit()
         self.addInput.setObjectName("classAddInput")
@@ -450,13 +462,22 @@ class AnnotationTreeWidget(QWidget):
         self.addInput.setMinimumWidth(220)
         self.addInput.setToolTip("输入类别后按 Enter，或点击上方 + 添加。长类别名称可在此完整编辑。")
 
-        action_bar.addWidget(self.btnAdd)
-        action_bar.addWidget(self.btnImportClasses)
-        action_bar.addWidget(self.btnGlobalAttributes)
-        action_bar.addWidget(self.btnAttributes)
-        action_bar.addStretch(1)
-        layout.addLayout(action_bar)
-        layout.addWidget(self.addInput)
+        action_grid.addWidget(self.btnImportClasses, 0, 0)
+        action_grid.addWidget(self.btnImportAttributes, 0, 1)
+        action_grid.addWidget(self.btnConvertCategories, 0, 2)
+        action_grid.addWidget(self.btnGlobalAttributes, 1, 0)
+        action_grid.addWidget(self.btnAttributes, 1, 1)
+        action_grid.setColumnStretch(0, 1)
+        action_grid.setColumnStretch(1, 1)
+        action_grid.setColumnStretch(2, 1)
+        layout.addLayout(action_grid)
+
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(0, 0, 0, 0)
+        add_row.setSpacing(4)
+        add_row.addWidget(self.btnAdd)
+        add_row.addWidget(self.addInput, 1)
+        layout.addLayout(add_row)
 
         # 3. Tree Widget
         self.treeWidget = QTreeWidget()
@@ -481,6 +502,10 @@ class AnnotationTreeWidget(QWidget):
         self.btnAttributes.clicked.connect(self._on_manage_attributes)
         self.btnGlobalAttributes.clicked.connect(self.manage_global_attributes_requested)
         self.btnImportClasses.clicked.connect(self.class_file_import_requested)
+        self.btnImportAttributes.clicked.connect(self.attribute_file_import_requested)
+        self.btnConvertCategories.clicked.connect(
+            lambda: self.category_conversion_requested.emit(self.get_selected_class() or "")
+        )
         self.treeWidget.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.treeWidget.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.treeWidget.customContextMenuRequested.connect(self._show_class_context_menu)
@@ -596,6 +621,7 @@ class AnnotationTreeWidget(QWidget):
         menu = QMenu(self.treeWidget)
         rename_action = menu.addAction("重命名类别")
         attributes_action = menu.addAction("管理类别属性")
+        conversion_action = menu.addAction("安全转换类别 / 属性…")
         menu.addSeparator()
         delete_action = menu.addAction("删除类别及其全部标注")
         action = menu.exec(global_pos)
@@ -606,6 +632,8 @@ class AnnotationTreeWidget(QWidget):
                 widget.start_edit()
         elif action == attributes_action:
             self.manage_attributes_requested.emit(class_name)
+        elif action == conversion_action:
+            self.category_conversion_requested.emit(class_name)
         elif action == delete_action:
             self.class_delete_requested.emit(class_name)
 

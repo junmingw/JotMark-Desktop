@@ -56,12 +56,13 @@ from ui.theme import DARK_THEME, LIGHT_THEME
 from jotmark.graphics.canvas import Canvas, CanvasMode, get_shape_scene_path
 from jotmark.graphics.geometry import mask_to_annotation_geometry, fit_obb_to_bounds, obb_corners
 from jotmark.data.exporter import Exporter
-from jotmark.data.attribute_schema import ClassAttributeStore
+from jotmark.data.attribute_schema import ATTRIBUTE_SCHEMA_FILE, ClassAttributeStore
 from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape
 from jotmark.config.pose_template import TemplateManager
 from utils.message import DialogOver
 from jotmark.config.paths import get_weights_base_dir
 from ui.attribute_widgets import AttributeSchemaDialog
+from ui.category_conversion_dialog import CategoryConversionDialog
 
 if MANUAL_ONLY:
     from jotmark.models.manual_client import ManualAnnotationClient as SAMClient, SAM_MODEL_MAP
@@ -1495,6 +1496,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.classListWidget.shape_class_reassigned.connect(self.on_shape_class_reassigned)
         self.classListWidget.class_delete_requested.connect(self.delete_class_and_annotations)
         self.classListWidget.class_file_import_requested.connect(self.import_class_file)
+        self.classListWidget.attribute_file_import_requested.connect(self.import_attribute_file)
+        self.classListWidget.category_conversion_requested.connect(self.open_category_conversion)
         self.classListWidget.manage_attributes_requested.connect(self.manage_class_attributes)
         self.classListWidget.manage_global_attributes_requested.connect(self.manage_global_attributes)
         self.classListWidget.annotation_shape_selected.connect(lambda _shape: self.update_attribute_editor())
@@ -3107,6 +3110,96 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         added = self._apply_class_names(class_names, replace=replace)
         action = "替换" if replace else "追加"
         DialogOver(self, f"已{action}类别文件：新增 {len(added)} 个类别。", "导入成功", "success")
+
+    def import_attribute_file(self):
+        """Import a schema file without removing automatic project loading.
+
+        Definitions are replaced only after validation and confirmation.  The
+        current schema is backed up first; existing per-shape JSON values are
+        intentionally retained rather than silently pruned.
+        """
+        if not self.current_dir:
+            DialogOver(self, "请先通过“打开目录”选择图片项目，再导入属性文件。", "未打开项目", "warning")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入属性配置文件",
+            self.current_dir,
+            "JotMark 属性文件 (class_attributes.json *.json);;JSON 文件 (*.json);;所有文件 (*)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as stream:
+                raw_schema = json.load(stream)
+            # Validate through an isolated store so a malformed file never
+            # changes the live project state.
+            preview_store = ClassAttributeStore()
+            preview = preview_store.replace_schema(raw_schema)
+        except (OSError, ValueError, TypeError) as exc:
+            DialogOver(self, f"属性文件无效，未作任何修改：\n{exc}", "导入失败", "warning")
+            return
+
+        target_path = os.path.join(self.current_dir, ATTRIBUTE_SCHEMA_FILE)
+        backup_dir = ""
+        if os.path.isfile(target_path):
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_dir = os.path.join(
+                self.current_dir,
+                ".jotmark_backups",
+                f"attribute-schema-import-{timestamp}",
+            )
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("确认导入属性")
+            dialog.setIcon(QMessageBox.Warning)
+            dialog.setText("当前项目已有属性配置。导入会替换属性定义。")
+            dialog.setInformativeText(
+                f"导入文件：\n{file_path}\n\n"
+                f"将导入 {preview['global_count']} 个公共属性、"
+                f"{preview['class_count']} 个类别的专属属性。\n\n"
+                f"现有配置将自动备份到：\n{backup_dir}\n\n"
+                "已存在于标注 JSON 中的属性值不会自动删除；若新配置没有对应属性，"
+                "这些旧值会保留在 JSON 内但不会显示在表单中。"
+            )
+            proceed = dialog.addButton("备份并替换", QMessageBox.AcceptRole)
+            dialog.addButton("取消", QMessageBox.RejectRole)
+            dialog.exec()
+            if dialog.clickedButton() != proceed:
+                return
+            try:
+                os.makedirs(backup_dir, exist_ok=False)
+                shutil.copy2(target_path, os.path.join(backup_dir, ATTRIBUTE_SCHEMA_FILE))
+            except OSError as exc:
+                DialogOver(self, f"无法创建属性配置备份，导入已取消：\n{exc}", "导入失败", "warning")
+                return
+
+        try:
+            self.attribute_store.replace_schema(raw_schema)
+            self.attribute_store.save()
+        except (OSError, ValueError, TypeError) as exc:
+            DialogOver(self, f"属性配置写入失败：\n{exc}", "导入失败", "warning")
+            return
+
+        self.update_attribute_editor()
+        backup_message = f"\n旧配置备份：{backup_dir}" if backup_dir else ""
+        DialogOver(
+            self,
+            f"已导入 {preview['global_count']} 个公共属性、{preview['class_count']} 个类别属性定义。"
+            f"\n配置已保存为：{target_path}{backup_message}",
+            "属性导入成功",
+            "success",
+        )
+
+    def open_category_conversion(self, selected_class=""):
+        """Open the copy-on-write class/attribute migration tool.
+
+        The conversion dialog intentionally operates on a selected directory
+        instead of the live canvas.  It makes a complete source snapshot and
+        writes a separate project, so no open annotation is silently changed.
+        """
+        source_dir = self.current_dir or self.annotation_output_dir or ""
+        dialog = CategoryConversionDialog(source_dir, selected_class, self)
+        dialog.exec()
 
     def save_classes(self):
         if self.current_dir:
