@@ -43,9 +43,9 @@ if getattr(sys, 'frozen', False):
 import json
 from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QInputDialog, QMessageBox, QLabel, \
     QListWidgetItem, QDialog, QMenu, QAbstractItemView, QProgressBar, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, \
-    QCheckBox, QListWidget, QFrame, QWidget
+    QCheckBox, QListWidget, QFrame, QWidget, QPlainTextEdit
 from PySide6.QtCore import Qt, QPointF, QRectF, QThread, Signal, QSize, QEvent, QSettings, QTimer
-from PySide6.QtGui import QPainter, QIcon, QPixmap, QColor, QBrush, QAction, QActionGroup, QPolygonF, QMovie, QKeySequence, QShortcut, QPainterPathStroker
+from PySide6.QtGui import QPainter, QIcon, QPixmap, QColor, QBrush, QAction, QActionGroup, QPolygonF, QMovie, QKeySequence, QShortcut, QPainterPath
 import cv2
 import numpy as np
 from PIL import Image
@@ -86,7 +86,12 @@ else:
 # Keep the desktop file picker aligned with the online service and Pillow's
 # common image support.  TIFF/WebP are especially common in industrial data.
 SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tif', '.tiff', '.gif')
-ANNOTATION_EXTENSION_BY_FORMAT = {"json": ".json", "yolo": ".txt", "xml": ".xml"}
+ANNOTATION_EXTENSION_BY_FORMAT = {
+    "json": ".json",
+    "yolo": ".txt",
+    "xml": ".xml",
+    "curvelanes": ".lines.txt",
+}
 DEFAULT_CLASS_TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples", "classes.example.txt")
 
 
@@ -1095,10 +1100,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.attribute_store = ClassAttributeStore()
         settings = QSettings("luohuabuxiema", "JotMark")
         self.annotation_output_dir = settings.value("annotation_output_dir", "") or ""
+        extension_setting = settings.value("show_file_extensions", False)
+        self.show_file_extensions = str(extension_setting).strip().lower() in {"1", "true", "yes", "on"}
+        self.btnFileExtensions.setChecked(self.show_file_extensions)
+        self._update_file_extension_button()
         self.class_list = []
         self.current_format = "json"
         self.yolo_filtered_class_ids = []
-        self._pending_sam_merge = None
         self.sam_merge_selection_mode = False
         self.sam_merge_label = None
         self._enforcing_sam_merge_selection = False
@@ -1122,12 +1130,29 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.statusBar.addWidget(self.modeLabel)
 
         self.helpLabel = QLabel("状态: 正在初始化")
+        # A full CUDA/PyTorch traceback can be thousands of characters long.
+        # Keep the status bar compact and expose the copyable detail in a
+        # dedicated dialog instead of letting QLabel enlarge the whole window.
+        self.helpLabel.setMaximumWidth(460)
+        self.helpLabel.setToolTip("运行状态与错误摘要")
         self.statusBar.addWidget(self.helpLabel)
+
+        self._last_runtime_error = ""
+        self.btnErrorDetails = QPushButton("错误详情")
+        self.btnErrorDetails.setObjectName("btnErrorDetails")
+        self.btnErrorDetails.setCursor(Qt.PointingHandCursor)
+        self.btnErrorDetails.setToolTip("查看并复制完整错误信息")
+        self.btnErrorDetails.setStyleSheet(
+            "QPushButton { color: #DC2626; font-weight: bold; border: none; padding: 0 6px; }"
+            "QPushButton:hover { color: #991B1B; text-decoration: underline; }"
+        )
+        self.btnErrorDetails.clicked.connect(self.show_runtime_error_details)
+        self.btnErrorDetails.hide()
+        self.statusBar.addWidget(self.btnErrorDetails)
 
         self.sam_client = SAMClient(self)
         self.sam_client.inference_result.connect(self.scene.handle_sam_result)
         self.sam_client.text_result_ready.connect(self.handle_text_results)
-        self.sam_client.merge_result_ready.connect(self.handle_sam_merge_result)
         self.sam_client.image_ready.connect(self.on_sam_image_ready)
         self.sam_client.model_status_changed.connect(self.update_model_status)
         self.scene.sam_client = self.sam_client
@@ -1197,9 +1222,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.btnModelSelector.hide()
         self.btnPredict.hide()
         self.btnClassFilter.hide()
-        self.btnMergeSam.hide()
         self.samTextGroup.hide()
         self.btnDatasetTool.hide()
+        self.update_sam_merge_button()
         self.helpLabel.setText("手工标注模式：无需模型、显卡或网络。")
         self.helpLabel.setStyleSheet("color: #16A34A;")
 
@@ -1392,7 +1417,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.btnRedo.clicked.connect(self.redo)
         self.btnDelete.clicked.connect(self.delete_selected)
         self.btnSave.clicked.connect(lambda: self.save_annotation(self.current_format))
-        self.btnMergeSam.clicked.connect(self.merge_selected_with_sam3)
+        self.btnMergeSam.clicked.connect(self.merge_selected_regions)
         self.btnAnnotationOutputDir.clicked.connect(self.choose_annotation_output_dir)
         self.btnKeyboard.clicked.connect(self.show_help_dialog)
 
@@ -1430,6 +1455,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.chkSelectAll.stateChanged.connect(self.on_select_all_toggled)
         self.btnDeleteFiles.clicked.connect(self.delete_checked_files)
+        self.btnFileExtensions.toggled.connect(self.set_file_extension_visible)
         self.btnPreviousImage.clicked.connect(self.show_previous_image)
         self.btnNextImage.clicked.connect(self.show_next_image)
         self.listFiles.itemChanged.connect(self.on_file_item_changed)
@@ -1438,6 +1464,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.scene.mouse_moved.connect(self.update_coordinate_label)
         self.scene.shape_drawn.connect(self.handle_new_shape)
         self.scene.shape_label_clicked.connect(self.on_shape_label_clicked)
+        self.scene.merge_selection_cancel_requested.connect(self.cancel_region_merge_selection)
 
         # These window-level shortcuts work even when the canvas has focus.
         self.previous_image_shortcut = QShortcut(QKeySequence(Qt.Key_PageUp), self)
@@ -1476,6 +1503,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.attributeEditor.class_label_changed.connect(self.on_shape_class_reassigned)
 
     def on_predict_clicked(self):
+        if self.current_format == "curvelanes":
+            DialogOver(
+                self,
+                "CurveLanes 格式仅保存手工绘制的开放折线；YOLO 预测结果不能转换为车道线标注。请切换到折线工具手工标注。",
+                "该格式不支持自动预测",
+                "warning",
+            )
+            return
         if not getattr(self, 'current_yolo_predictor', None):
             DialogOver(self, "YOLO 模型未加载或初始化失败！", "提示", "warning")
             return
@@ -1488,7 +1523,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         for i in range(self.listFiles.count()):
             item = self.listFiles.item(i)
             if item and item.checkState() == Qt.Checked:
-                checked_paths.append(item.text())
+                checked_paths.append(self._file_item_path(item))
 
         if checked_paths:
             # YOLO 批量预测逻辑
@@ -1854,6 +1889,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     print(f"批量更新文件失败: {e}")
             
             if changed:
+                # Keep AnnotationTreeWidget's live-shape cache aligned with
+                # the new labels before any later class/theme rebuild.  Without
+                # this immediate refresh, a renamed category can temporarily
+                # group cached rows under the old name and leave blank/missing
+                # annotation entries on the right panel.
+                self.update_annotation_tree()
+                self.update_attribute_editor()
                 self.auto_save_annotation()
                 self.push_state()
             DialogOver(self, f"已将所有的 '{old_name}' 批量变更为 '{new_name}'", "修改成功", "success")
@@ -1975,7 +2017,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             "此操作不能通过撤销恢复。请先按 Ctrl+S 保存当前工作，并备份图片、JSON、"
             "class_attributes.json 后再继续。"
         )
-        continue_button = dialog.addButton("我已备份，继续删除", QMessageBox.DestructiveRole)
+        continue_button = dialog.addButton("我已确认，继续删除", QMessageBox.DestructiveRole)
         dialog.addButton("取消", QMessageBox.RejectRole)
         dialog.exec()
         if dialog.clickedButton() != continue_button:
@@ -2236,6 +2278,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             DialogOver(self, f"启动失败: {e}", "系统错误", "danger")
 
     def trigger_sam_prompt(self):
+        if self.current_format == "curvelanes":
+            DialogOver(
+                self,
+                "CurveLanes 格式仅保存手工绘制的开放折线；SAM 的矩形、多边形结果不能转换为车道线标注。",
+                "该格式不支持智能提取",
+                "warning",
+            )
+            return
         prompt = self.samPromptInput.text().strip()
         if not prompt:
             DialogOver(self, "请输入提示词进行提取！", "提示", "warning")
@@ -2246,7 +2296,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         for i in range(self.listFiles.count()):
             item = self.listFiles.item(i)
             if item and item.checkState() == Qt.Checked:
-                checked_paths.append(item.text())
+                checked_paths.append(self._file_item_path(item))
 
         if len(checked_paths) > 1:
             # 批量处理逻辑
@@ -2397,34 +2447,23 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if isinstance(item, (RectShape, PolyShape, RotatedRectShape))
             and not getattr(item, "is_temp", False)
         ]
-        is_sam3_ready = (
-            self.sam_client.current_model_type == "sam3"
-            and self.sam_client.model is not None
-            and getattr(self.sam_client, "_sam3_worker", None) is not None
-            and getattr(self.sam_client._sam3_worker, "inference_state", None) is not None
-        )
-        if not is_sam3_ready:
-            self.sam_merge_selection_mode = False
-            self.scene.merge_selection_mode = False
-            self.sam_merge_label = None
-            self.classListWidget.set_merge_selection_mode(False)
-
-        is_pending = self._pending_sam_merge is not None
-        self.btnMergeSam.setEnabled(is_sam3_ready and not is_pending)
+        self.btnMergeSam.setEnabled(True)
         self.btnMergeSam.setChecked(self.sam_merge_selection_mode)
 
-        if is_pending:
-            self.btnMergeSam.setIcon(self.set_icon_color(QIcon("ui/icon/merge.svg"), QColor("#64748B")))
-            self.btnMergeSam.setStyleSheet("QToolButton { border: none; background: transparent; border-radius: 6px; }")
-            self.btnMergeSam.setToolTip("SAM3 正在合并选中的标注片段…")
-        elif self.sam_merge_selection_mode:
+        if self.sam_merge_selection_mode:
             self.btnMergeSam.setIcon(self.set_icon_color(QIcon("ui/icon/merge.svg"), QColor("#FACC15")))
             self.btnMergeSam.setStyleSheet(
                 "QToolButton { background-color: rgba(250, 204, 21, 0.25); border: 1px solid #FACC15; border-radius: 6px; }"
                 "QToolButton:hover { background-color: rgba(250, 204, 21, 0.38); }"
             )
-            self.btnMergeSam.setToolTip(f"已选择 {len(selected_shapes)} 个片段；再次点击以确认合并")
-            self.helpLabel.setText(f"SAM3 合并选择中：已选择 {len(selected_shapes)} 个片段。继续点击同类标注；完成后再次点击合并按钮。")
+            self.btnMergeSam.setToolTip(
+                f"已选择 {len(selected_shapes)} 个区域；再次点击以精确合并。"
+                "按 Esc、点击空白处，或在不足两个区域时再次点击按钮可取消"
+            )
+            self.helpLabel.setText(
+                f"区域合并选择中：已选择 {len(selected_shapes)} 个区域。"
+                "再次点击已选区域可取消；按 Esc 或点击空白处退出。"
+            )
             self.helpLabel.setStyleSheet("color: #D97706;")
         else:
             inactive_color = QColor("#94A3B8") if self.is_dark_theme else QColor("#64748B")
@@ -2433,7 +2472,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 "QToolButton { border: none; background: transparent; border-radius: 6px; opacity: 0.65; }"
                 "QToolButton:hover { background-color: rgba(128, 128, 128, 0.2); }"
             )
-            self.btnMergeSam.setToolTip("SAM3 合并选中标注：首次点击开始选择，再次点击确认合并")
+            self.btnMergeSam.setToolTip("精确合并：选择多个同类闭合区域后点击；或先点击此按钮进入多选模式")
 
     def enforce_sam_merge_selection(self):
         if not self.sam_merge_selection_mode or self._enforcing_sam_merge_selection:
@@ -2459,149 +2498,132 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             finally:
                 self._enforcing_sam_merge_selection = False
             self.statusBar.showMessage(f"只能选择“{self.sam_merge_label}”类别的标注片段。", 4500)
-            self.helpLabel.setText("SAM3 合并选择中：不同类别的标注已被自动排除。")
+            self.helpLabel.setText("区域合并选择中：不同类别的标注已被自动排除。")
             self.helpLabel.setStyleSheet("color: #DC2626;")
 
     @staticmethod
-    def _sam_merge_shapes_connected(shapes):
-        if len(shapes) < 2:
-            return False
-        paths = [get_shape_scene_path(shape) for shape in shapes]
-        stroker = QPainterPathStroker()
-        stroker.setWidth(4.0)
+    def _exact_union_polygon(shapes):
+        """Return one exact vector union polygon, or ``None`` if impossible.
 
-        def touching_or_overlapping(first, second):
-            if first.intersects(second):
-                return True
-            return stroker.createStroke(first).intersects(second) or stroker.createStroke(second).intersects(first)
+        ``PolyShape`` stores only one outer boundary.  Multiple disconnected
+        islands and holes cannot be represented without inventing or erasing
+        labeled area, so such selections are deliberately rejected.
+        """
+        union_path = QPainterPath()
+        union_path.setFillRule(Qt.WindingFill)
+        for shape in shapes:
+            path = get_shape_scene_path(shape)
+            path.setFillRule(Qt.WindingFill)
+            union_path = union_path.united(path)
 
-        connected = {0}
-        while True:
-            added = False
-            for index, path in enumerate(paths):
-                if index in connected:
-                    continue
-                if any(touching_or_overlapping(path, paths[other]) for other in connected):
-                    connected.add(index)
-                    added = True
-            if not added:
-                break
-        return len(connected) == len(paths)
+        union_path = union_path.simplified()
+        fill_polygons = union_path.toFillPolygons()
+        subpaths = union_path.toSubpathPolygons()
+        if len(fill_polygons) != 1 or len(subpaths) != 1:
+            return None
 
-    def merge_selected_with_sam3(self):
-        is_sam3_ready = (
-            self.sam_client.current_model_type == "sam3"
-            and self.sam_client.model is not None
-            and getattr(self.sam_client, "_sam3_worker", None) is not None
-            and self.sam_client._sam3_worker.inference_state is not None
-        )
-        if not is_sam3_ready:
-            DialogOver(self, "请先加载 SAM3 模型并等待当前图片特征提取完成。", "SAM3 合并", "warning")
-            return
+        polygon = QPolygonF(fill_polygons[0])
+        # Qt commonly repeats the first point at the end. PolyShape closes its
+        # own contour, so remove only that redundant endpoint.
+        if polygon.count() > 1 and polygon.first() == polygon.last():
+            polygon.remove(polygon.count() - 1)
+        return polygon if polygon.count() >= 3 else None
 
-        if not self.sam_merge_selection_mode:
-            self.sam_merge_selection_mode = True
-            self.scene.merge_selection_mode = True
-            self.sam_merge_label = None
-            self.classListWidget.set_merge_selection_mode(True)
-            for item in self.scene.selectedItems():
-                item.setSelected(False)
-            self.update_sam_merge_button()
-            self.statusBar.showMessage("SAM3 合并：请依次点击同类别的标注片段；再次点击合并按钮确认。", 7000)
-            return
+    def _finish_region_merge_selection(self):
+        self.sam_merge_selection_mode = False
+        self.scene.merge_selection_mode = False
+        self.sam_merge_label = None
+        self.classListWidget.set_merge_selection_mode(False)
 
+    def cancel_region_merge_selection(self):
+        """Exit temporary merge selection without changing annotation geometry."""
+        was_active = self.sam_merge_selection_mode or self.scene.merge_selection_mode
+        self._finish_region_merge_selection()
+        for item in list(self.scene.selectedItems()):
+            item.setSelected(False)
+        self.update_annotation_tree()
+        self.update_attribute_editor()
+        self.update_sam_merge_button()
+        if was_active:
+            self.helpLabel.setText("已取消区域合并；原有标注未作任何修改。")
+            self.helpLabel.setStyleSheet("color: #64748B;")
+            self.statusBar.showMessage("已取消区域合并。", 3000)
+
+    def merge_selected_regions(self):
         selected_shapes = [
             item for item in self.scene.selectedItems()
             if isinstance(item, (RectShape, PolyShape, RotatedRectShape))
             and not getattr(item, "is_temp", False)
         ]
+
+        # With fewer than two selected regions, a second toolbar click exits
+        # temporary merge mode instead of trapping the user there.
+        if self.sam_merge_selection_mode and len(selected_shapes) < 2:
+            self.cancel_region_merge_selection()
+            return
+
+        # Ctrl-click can already select multiple regions. If fewer than two
+        # are selected, enter the dedicated extended-selection mode; the next
+        # click of this button confirms the exact union.
+        if not self.sam_merge_selection_mode and len(selected_shapes) < 2:
+            self.sam_merge_selection_mode = True
+            self.scene.merge_selection_mode = True
+            self.sam_merge_label = None
+            self.classListWidget.set_merge_selection_mode(True)
+            self.update_sam_merge_button()
+            self.statusBar.showMessage(
+                "区域合并：点击区域可选择/取消；按 Esc、点击空白处或再次点击按钮可取消。",
+                7000,
+            )
+            return
+
         if len(selected_shapes) < 2:
-            self.helpLabel.setText("SAM3 合并选择中：至少选择两个同类别片段后，再次点击合并按钮。")
+            self.helpLabel.setText("区域合并选择中：至少选择两个同类别闭合区域后，再次点击合并按钮。")
             self.helpLabel.setStyleSheet("color: #D97706;")
-            self.statusBar.showMessage("尚未选够两个片段，请继续点击标注。", 4000)
+            self.statusBar.showMessage("尚未选够两个区域，请继续点击标注。", 4000)
             return
 
         labels = {getattr(shape, "label", "") for shape in selected_shapes}
         if len(labels) != 1:
-            self.helpLabel.setText("SAM3 合并选择中：只能选择同一类别的片段。按 Ctrl + 点击可取消错误选择。")
+            self.helpLabel.setText("区域合并选择中：只能选择同一类别的区域。再次点击错误选择即可取消。")
             self.helpLabel.setStyleSheet("color: #DC2626;")
             self.statusBar.showMessage("所选标注类别不一致，请取消不需要的选择后重试。", 5000)
             return
 
-        if not self._sam_merge_shapes_connected(selected_shapes):
-            self.helpLabel.setText("SAM3 合并选择中：所选片段彼此未相交或相连，不能合并。")
+        polygon = self._exact_union_polygon(selected_shapes)
+        if polygon is None:
+            self.helpLabel.setText("无法无损合并：区域必须形成一个无孔、连续的外轮廓。")
             self.helpLabel.setStyleSheet("color: #DC2626;")
-            self.statusBar.showMessage("仅可合并相交、接触或紧邻的同类标注片段。", 5000)
+            self.statusBar.showMessage("所选区域彼此分离、仅点接触或形成孔洞；已保留原标注。", 6000)
             return
 
-        points = []
+        label = labels.pop()
+        attributes = getattr(selected_shapes[0], "attributes", {})
+        keep_attributes = all(getattr(shape, "attributes", {}) == attributes for shape in selected_shapes)
+        merged_shape = PolyShape(polygon, label)
+        merged_shape.attributes = dict(attributes) if keep_attributes and isinstance(attributes, dict) else {}
+
         for shape in selected_shapes:
-            center = shape.sceneBoundingRect().center()
-            point = [round(center.x(), 2), round(center.y(), 2)]
-            if point not in points:
-                points.append(point)
-
-        if len(points) < 2:
-            self.helpLabel.setText("SAM3 合并选择中：所选片段的提示点重合，请重新选择。")
-            self.helpLabel.setStyleSheet("color: #DC2626;")
-            return
-
-        self.sam_merge_selection_mode = False
-        self.scene.merge_selection_mode = False
-        self.sam_merge_label = None
-        self.classListWidget.set_merge_selection_mode(False)
-        self._pending_sam_merge = {"items": selected_shapes, "label": labels.pop()}
-        self.update_sam_merge_button()
-        self.helpLabel.setText(f"SAM3 正在合并 {len(selected_shapes)} 个标注片段...")
-        self.helpLabel.setStyleSheet("color: orange;")
-        self.sam_client.request_merge_inference(points)
-
-    def handle_sam_merge_result(self, poly_pts, rect_xywh, rect_obb, score):
-        pending = self._pending_sam_merge
-        self._pending_sam_merge = None
-        self.sam_merge_selection_mode = False
-        self.scene.merge_selection_mode = False
-        self.sam_merge_label = None
-        self.classListWidget.set_merge_selection_mode(False)
-        if not pending:
-            self.update_sam_merge_button()
-            return
-
-        if len(poly_pts) < 3:
-            self.helpLabel.setText("SAM3 未能生成可合并的整体轮廓。")
-            self.helpLabel.setStyleSheet("color: red;")
-            DialogOver(self, "未生成有效轮廓，原标注已保留。", "SAM3 合并失败", "warning")
-            self.update_sam_merge_button()
-            return
-
-        original_items = [item for item in pending["items"] if item.scene() is self.scene]
-        if len(original_items) < 2:
-            self.helpLabel.setText("SAM3 合并已取消：原标注已被修改。")
-            self.helpLabel.setStyleSheet("color: orange;")
-            self.update_sam_merge_button()
-            return
-
-        label = pending["label"]
-        if self.scene.mode == CanvasMode.RECT:
-            xs = [point[0] for point in poly_pts]
-            ys = [point[1] for point in poly_pts]
-            merged_shape = RectShape(QRectF(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)), label)
-            result_type = "矩形"
-        else:
-            merged_shape = PolyShape(QPolygonF([QPointF(point[0], point[1]) for point in poly_pts]), label)
-            result_type = "多边形"
-        for item in original_items:
-            self.scene.removeItem(item)
+            if shape.scene() is self.scene:
+                self.scene.removeItem(shape)
         self.scene.addItem(merged_shape)
         merged_shape.set_color(self.classListWidget.get_class_color(label))
-        merged_shape.setSelected(False)
+        merged_shape.setSelected(True)
 
+        self._finish_region_merge_selection()
         self.update_annotation_tree()
+        self.update_attribute_editor()
         self.auto_save_annotation()
         self.push_state()
-        self.helpLabel.setText(f"SAM3 已将 {len(original_items)} 个片段合并为一个{result_type}（置信度 {score:.2f}）。")
+        self.helpLabel.setText(f"已精确合并 {len(selected_shapes)} 个区域；未调用 SAM3。")
         self.helpLabel.setStyleSheet("color: green;")
+        self.statusBar.showMessage("区域已按选中轮廓的几何并集完成合并。", 5000)
         self.update_sam_merge_button()
+
+    # Backward-compatible API for extensions that still use the old method.
+    # The operation is intentionally now a local, exact geometry union.
+    def merge_selected_with_sam3(self):
+        self.merge_selected_regions()
 
     def delete_selected(self):
         for item in self.scene.selectedItems():
@@ -2759,13 +2781,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             <li><b style="color:red;">Ctrl + S</b>：保存当前标注</li>
             <li><b style="color:blue;">Q</b>：开启/关闭 SAM 智能辅助</li>
             <li><b>R</b>：切换至 矩形标注</li>
-            <li><b>V</b>：切换至 选择/编辑模式；点击画布上的类别英文可切换标签，或将右侧具体标注拖放到另一类别下</li>
+            <li><b>V</b>：切换至选择/编辑模式；右侧可直接点击任一具体标注同步选中画布。右击该标注可修改类别或删除；也可将其拖到另一类别下改类。</li>
             <li><b>P</b>：切换至 多边形标注</li>
             <li><b>L</b>：切换至 折线标注</li>
             <li><b>T</b>：切换至 关键点标注</li>
             <li><b>O</b>：切换至 旋转框标注</li>
             <li><b>M</b>：触发 模型预测 (Smart 模式并加载模型时可用)</li>
-            <li><b>SAM3 合并</b>：选中两个及以上同类标注，点击保存按钮右侧的合并图标，将多个片段合并为一个多边形</li>
+            <li><b>精确区域合并</b>：选中两个及以上同类、相连的闭合区域，点击保存按钮右侧的合并图标；程序只计算几何并集，不调用 SAM3 重绘区域</li>
             <li><b>Del / Backspace</b>：删除当前选中的标注框</li>
             <li><b>F1</b>：打开此帮助文档</li>
         </ul>
@@ -3432,6 +3454,59 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.btnPreviousImage.setEnabled(current_idx > 0)
         self.btnNextImage.setEnabled(0 <= current_idx < total - 1)
 
+    @staticmethod
+    def _file_item_path(item):
+        """Return an image path without relying on the visible list text."""
+        if not item:
+            return ""
+        return item.data(Qt.UserRole) or item.text()
+
+    def _file_item_display_name(self, image_path):
+        filename = os.path.basename(image_path)
+        if self.show_file_extensions:
+            return filename
+        return os.path.splitext(filename)[0]
+
+    def _create_file_list_item(self, image_path):
+        """Create a file-list row whose text is presentation-only.
+
+        The absolute path belongs in ``Qt.UserRole`` so changing the visible
+        name/extension never breaks loading, auto-save, export, or deletion.
+        """
+        image_path = os.path.abspath(image_path)
+        item = QListWidgetItem(self._file_item_display_name(image_path))
+        item.setData(Qt.UserRole, image_path)
+        item.setToolTip(image_path)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Unchecked)
+        return item
+
+    def _update_file_extension_button(self):
+        if not hasattr(self, "btnFileExtensions"):
+            return
+        state = "显示" if self.show_file_extensions else "隐藏"
+        next_action = "隐藏" if self.show_file_extensions else "显示"
+        self.btnFileExtensions.setText("后缀")
+        self.btnFileExtensions.setToolTip(f"当前：{state}图片文件后缀；点击可{next_action}")
+
+    def set_file_extension_visible(self, visible):
+        """Toggle filename extensions while preserving file-list state."""
+        self.show_file_extensions = bool(visible)
+        QSettings("luohuabuxiema", "JotMark").setValue(
+            "show_file_extensions", self.show_file_extensions
+        )
+        self._update_file_extension_button()
+
+        signals_were_blocked = self.listFiles.blockSignals(True)
+        try:
+            for index in range(self.listFiles.count()):
+                item = self.listFiles.item(index)
+                image_path = self._file_item_path(item)
+                if image_path:
+                    item.setText(self._file_item_display_name(image_path))
+        finally:
+            self.listFiles.blockSignals(signals_were_blocked)
+
     def annotation_output_path(self, image_path, format_type=None):
         """Return the sidecar annotation path for an image in the active output directory."""
         format_type = format_type or self.current_format
@@ -3480,17 +3555,27 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 item = self.listFiles.item(index)
                 if not item:
                     continue
-                image_path = item.text()
-                saved_paths = [
-                    self.annotation_output_path(image_path, format_type)
+                image_path = self._file_item_path(item)
+                saved_paths = {
+                    format_type: self.annotation_output_path(image_path, format_type)
                     for format_type in ANNOTATION_EXTENSION_BY_FORMAT
+                }
+                existing_formats = [
+                    format_type for format_type, path in saved_paths.items()
+                    if os.path.isfile(path)
                 ]
-                existing_paths = [path for path in saved_paths if os.path.isfile(path)]
+                existing_paths = [saved_paths[format_type] for format_type in existing_formats]
                 if existing_paths:
                     annotated += 1
                     item.setForeground(QBrush(QColor("#16A34A")))
-                    formats = ", ".join(os.path.splitext(path)[1].lstrip(".").upper() for path in existing_paths)
-                    item.setToolTip(f"已标注（{formats}）：{existing_paths[0]}")
+                    format_labels = {
+                        "json": "JSON",
+                        "yolo": "YOLO",
+                        "xml": "XML",
+                        "curvelanes": "CurveLanes",
+                    }
+                    formats = ", ".join(format_labels[format_type] for format_type in existing_formats)
+                    item.setToolTip(f"图片：{image_path}\n已标注（{formats}）：{existing_paths[0]}")
                 else:
                     item.setForeground(QBrush())
                     item.setToolTip(image_path)
@@ -3507,10 +3592,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.listFiles.blockSignals(True)
             for f in os.listdir(dir_path):
                 if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS):
-                    item = QListWidgetItem(os.path.join(dir_path, f))
-                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                    item.setCheckState(Qt.Unchecked)
-                    self.listFiles.addItem(item)
+                    self.listFiles.addItem(self._create_file_list_item(os.path.join(dir_path, f)))
             self.listFiles.blockSignals(False)
             self.update_selected_count()
 
@@ -3525,14 +3607,23 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     #         self.helpLabel.setStyleSheet("color: red;")
 
     def update_model_status(self, success, msg):
-        self.helpLabel.setText(msg)
+        message = str(msg or "")
         if success:
+            self.clear_runtime_error()
+            self.helpLabel.setText(message)
             self.helpLabel.setStyleSheet("color: green;")
             # 模型加载成功后，检查用户是不是已经提前打开图片了
             if self.current_image_path:
                 self.request_sam_image_encoding(self.current_image_path)
         else:
-            self.helpLabel.setStyleSheet("color: red;")
+            # Loading progress is intentionally emitted as a False status. It
+            # is not an error and should not expose the detail button.
+            if "正在加载" in message or "请稍候" in message:
+                self.clear_runtime_error()
+                self.helpLabel.setText(message)
+                self.helpLabel.setStyleSheet("color: orange;")
+            else:
+                self.set_runtime_error("模型加载失败", message)
         self.update_sam_merge_button()
 
     def request_sam_image_encoding(self, image_path):
@@ -3550,12 +3641,74 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return
         self._sam_image_request_id = None
         if success:
+            self.clear_runtime_error()
             self.helpLabel.setStyleSheet("color: green;")
             self._update_help_text(self.scene.mode)
         else:
-            self.helpLabel.setText(f"图片特征解析失败：{error_message}")
-            self.helpLabel.setStyleSheet("color: red;")
+            self.set_runtime_error("图片特征解析失败", error_message)
         self.update_sam_merge_button()
+
+    @staticmethod
+    def _runtime_error_summary(message, max_length=100):
+        """Produce a single-line status-bar summary for a verbose exception."""
+        message = " ".join(str(message or "未知错误").split())
+        lowered = message.lower()
+        if "out of memory" in lowered or "cuda oom" in lowered:
+            return "CUDA 显存不足"
+        if len(message) > max_length:
+            return message[:max_length - 1].rstrip() + "…"
+        return message
+
+    def set_runtime_error(self, context, message):
+        """Show a bounded error summary and retain complete copyable details."""
+        context = str(context or "运行失败")
+        detail = str(message or "未知错误")
+        self._last_runtime_error = f"{context}\n\n{detail}"
+        summary = self._runtime_error_summary(detail)
+        self.helpLabel.setText(f"{context}：{summary}（点击“错误详情”复制）")
+        self.helpLabel.setToolTip(self.helpLabel.text())
+        self.helpLabel.setStyleSheet("color: #DC2626;")
+        self.btnErrorDetails.show()
+
+    def clear_runtime_error(self):
+        self._last_runtime_error = ""
+        if hasattr(self, "btnErrorDetails"):
+            self.btnErrorDetails.hide()
+
+    def show_runtime_error_details(self):
+        """Open a selectable/copyable dialog without affecting main-window size."""
+        if not self._last_runtime_error:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("JotMark 错误详情")
+        dialog.resize(760, 440)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        hint = QLabel("以下信息可复制后发送给维护者。")
+        layout.addWidget(hint)
+        detail_box = QPlainTextEdit()
+        detail_box.setReadOnly(True)
+        detail_box.setPlainText(self._last_runtime_error)
+        detail_box.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(detail_box, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        copy_button = QPushButton("复制完整错误")
+        close_button = QPushButton("关闭")
+        buttons.addWidget(copy_button)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        def copy_error():
+            QApplication.clipboard().setText(self._last_runtime_error)
+            copy_button.setText("已复制")
+
+        copy_button.clicked.connect(copy_error)
+        close_button.clicked.connect(dialog.accept)
+        dialog.exec()
 
     def show_file_list_context_menu(self, pos):
         """显示文件列表右键菜单"""
@@ -3581,7 +3734,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         count = len(items)
 
         # 记录需要删除的路径
-        paths_to_delete = [item.text() for item in items]
+        paths_to_delete = [self._file_item_path(item) for item in items]
         
         # 如果当前正在查看的文件被删除了，需要切换
         current_deleted = self.current_image_path in paths_to_delete
@@ -3675,10 +3828,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.auto_save_annotation(immediate=True)
 
         if current:
-            path = current.text()
+            path = self._file_item_path(current)
             self.current_image_path = path
             self.scene.load_image(path)
-            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self.view.reset_to_fit()
             self.load_annotations(path)
             self.apply_class_colors_to_scene()
             self.update_annotation_tree()
@@ -3721,6 +3874,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def _annotation_signature(self, shapes_data):
         return json.dumps(shapes_data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+    @staticmethod
+    def _curvelanes_polyline_count(shapes_data):
+        """Return the number of valid open polylines for CondLaneNet export."""
+        return sum(
+            1
+            for shape in shapes_data
+            if shape.get("type") == "linestrip" and len(shape.get("points", [])) >= 2
+        )
+
     def _remember_current_annotation_signature(self):
         if not self.current_image_path or not self.scene.img_item:
             return
@@ -3750,6 +3912,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self._saved_annotation_signatures[out_path] = signature
             return
 
+        if self.current_format == "curvelanes" and not self._curvelanes_polyline_count(shapes_data):
+            # A CurveLanes sidecar only represents open polylines.  Do not
+            # leave an empty file that the file list would show as annotated.
+            if out_path and os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except Exception as e:
+                    print(f"删除空 CurveLanes 标注文件失败: {out_path}, {e}")
+            self.update_annotation_status()
+            self._saved_annotation_signatures[out_path] = signature
+            return
+
         img_rect = self.scene.image_rect()
 
         try:
@@ -3760,6 +3934,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 Exporter.save_yolo(out_path, img_rect.width(), img_rect.height(), shapes_data, self.class_list)
             elif self.current_format == "xml":
                 Exporter.save_xml(out_path, self.current_image_path, img_rect.width(), img_rect.height(), shapes_data)
+            elif self.current_format == "curvelanes":
+                Exporter.save_curvelanes(out_path, shapes_data)
             self._saved_annotation_signatures[out_path] = signature
             self.update_annotation_status()
         except Exception as e:
@@ -3780,7 +3956,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.scene.clear_shapes()
             self.load_annotations(self.current_image_path)
         self.update_annotation_status()
-        DialogOver(self, f"当前保存及读取格式变为 {format_type.upper()}", "格式切换", "info")
+        if format_type == "curvelanes":
+            DialogOver(
+                self,
+                "当前为 CurveLanes / CondLaneNet 格式：仅保存开放折线为 .lines.txt；类别和属性不会写入此训练格式。",
+                "格式切换",
+                "info",
+            )
+        else:
+            DialogOver(self, f"当前保存及读取格式变为 {format_type.upper()}", "格式切换", "info")
 
     def load_annotations(self, image_path):
         if not self.scene.img_item: return
@@ -3793,6 +3977,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self._load_yolo(self.annotation_output_path(image_path, "yolo"), img_w, img_h)
         elif self.current_format == "xml":
             self._load_xml(self.annotation_output_path(image_path, "xml"))
+        elif self.current_format == "curvelanes":
+            self._load_curvelanes(self.annotation_output_path(image_path, "curvelanes"))
 
     def _add_shape_to_scene(self, shape, label):
         """往画板内添加加载出来的轮廓并同步历史类别"""
@@ -3997,6 +4183,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         except Exception as e:
             print(f"加载 XML 标注失败: {e}")
 
+    def _load_curvelanes(self, lines_path):
+        """Load CondLaneNet's class-less .lines.txt sidecar as open polylines."""
+        if not os.path.exists(lines_path):
+            return
+        # The upstream format deliberately has no class id.  Keep imported
+        # lanes editable by assigning the first project class when available;
+        # otherwise create a neutral lane class once.
+        label = self.class_list[0] if self.class_list else "lane"
+        try:
+            for points in Exporter.load_curvelanes(lines_path):
+                qpoints = [QPointF(point[0], point[1]) for point in points]
+                self._add_shape_to_scene(PolylineShape(QPolygonF(qpoints), label), label)
+        except Exception as e:
+            print(f"加载 CurveLanes 标注失败: {e}")
+
     def save_annotation(self, format_type):
         if not self.current_image_path or not self.scene.img_item:
             QMessageBox.warning(self, "提示", "请先打开图片")
@@ -4023,6 +4224,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 DialogOver(self, "当前界面没有标注信息，无需保存！", "提示", "warning")
             return
 
+        if format_type == "curvelanes" and not self._curvelanes_polyline_count(shapes_data):
+            DialogOver(
+                self,
+                "CurveLanes / CondLaneNet 只接受至少两个点的开放折线。请使用“折线标注”工具绘制车道线后再保存。",
+                "没有可导出的折线",
+                "warning",
+            )
+            return
+
         img_rect = self.scene.image_rect()
 
         try:
@@ -4034,10 +4244,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 Exporter.save_yolo(out_path, img_rect.width(), img_rect.height(), shapes_data, self.class_list)
             elif format_type == "xml":
                 Exporter.save_xml(out_path, self.current_image_path, img_rect.width(), img_rect.height(), shapes_data)
+            elif format_type == "curvelanes":
+                written_count, skipped_count = Exporter.save_curvelanes(out_path, shapes_data)
 
             self._saved_annotation_signatures[out_path] = self._annotation_signature(shapes_data)
             self.update_annotation_status()
-            DialogOver(self, f"标注文件保存/更新成功！", "保存成功", "success")
+            if format_type == "curvelanes" and skipped_count:
+                DialogOver(
+                    self,
+                    f"已导出 {written_count} 条折线到 .lines.txt；另有 {skipped_count} 个非折线标注未导出。",
+                    "保存成功",
+                    "success",
+                )
+            else:
+                DialogOver(self, f"标注文件保存/更新成功！", "保存成功", "success")
             print(f"标注文件已保存到: {out_path}")
         except Exception as e:
             DialogOver(self, f"写入失败: {str(e)}", "保存出错", "danger")
@@ -4073,10 +4293,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             for f in os.listdir(last_dir):
                 if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS):
                     full_path = os.path.join(last_dir, f)
-                    item = QListWidgetItem(full_path)
-                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                    item.setCheckState(Qt.Unchecked)
-                    self.listFiles.addItem(item)
+                    self.listFiles.addItem(self._create_file_list_item(full_path))
                     if last_image and os.path.normpath(full_path) == os.path.normpath(last_image):
                         target_row = self.listFiles.count() - 1
             self.listFiles.blockSignals(False)
@@ -4101,6 +4318,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def keyPressEvent(self, event):
         key = event.key()
         modifiers = event.modifiers()
+
+        if key == Qt.Key_Escape and self.sam_merge_selection_mode:
+            self.cancel_region_merge_selection()
+            event.accept()
+            return
 
         # 撤销与重做快捷键（统一 Ctrl+Shift+Z 为重做）
         if key == Qt.Key_Z and modifiers == (Qt.ControlModifier | Qt.ShiftModifier):

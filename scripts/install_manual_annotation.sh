@@ -6,21 +6,82 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_DIR="${ENV_DIR:-$ROOT/.venv-jotmark-manual}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=10
 
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    echo "未找到 Python 3。请先安装 Python 3、python3-venv 和 python3-pip。" >&2
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+python_is_supported() {
+    "$1" -c "import sys; raise SystemExit(0 if sys.version_info >= (${MIN_PYTHON_MAJOR}, ${MIN_PYTHON_MINOR}) else 1)" \
+        >/dev/null 2>&1
+}
+
+install_ubuntu_prerequisites() {
+    local sudo_cmd=()
+    if [[ "${EUID}" -ne 0 ]]; then
+        if ! has_command sudo; then
+            echo "当前账户没有 sudo，无法自动安装系统组件。请让管理员安装 Python 3、python3-venv、python3-pip、libgl1、libegl1 和 libxcb-cursor0。" >&2
+            return 1
+        fi
+        sudo_cmd=(sudo)
+    fi
+
+    echo "正在安装 JotMark 手工版所需的系统组件（可能需要输入登录密码）..."
+    "${sudo_cmd[@]}" apt-get update
+    DEBIAN_FRONTEND=noninteractive "${sudo_cmd[@]}" apt-get install -y \
+        python3 python3-venv python3-pip libgl1 libegl1 libxcb-cursor0
+}
+
+ensure_system_prerequisites() {
+    local needs_setup=0
+    if ! has_command "$PYTHON_BIN"; then
+        echo "未检测到 Python 3。"
+        needs_setup=1
+    elif ! python_is_supported "$PYTHON_BIN"; then
+        echo "检测到的 Python 版本低于 ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}：$($PYTHON_BIN --version 2>&1)" >&2
+        echo "JotMark 手工版需要 Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} 或更高版本。" >&2
+        return 1
+    elif ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
+        echo "检测到 Python，但缺少 python3-venv。"
+        needs_setup=1
+    fi
+
+    if [[ "$needs_setup" -eq 0 ]]; then
+        return 0
+    fi
+
+    if has_command apt-get; then
+        install_ubuntu_prerequisites
+        hash -r
+        return 0
+    fi
+
+    cat >&2 <<'EOF'
+无法识别可自动安装的软件包管理器。本安装器目前可自动配置 Ubuntu / Debian。
+请先通过系统的软件管理器安装 Python 3.10+、venv、pip，以及 Qt 所需的
+OpenGL / EGL / XCB Cursor 图形库，再重新运行本脚本。
+EOF
+    return 1
+}
+
+if ! ensure_system_prerequisites; then
+    exit 2
+fi
+
+if ! has_command "$PYTHON_BIN"; then
+    echo "系统组件安装后仍未找到 $PYTHON_BIN。请关闭并重新打开终端后再运行本脚本。" >&2
+    exit 2
+fi
+
+if ! python_is_supported "$PYTHON_BIN"; then
+    echo "当前 Python 不满足 Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ 要求：$($PYTHON_BIN --version 2>&1)" >&2
     exit 2
 fi
 
 if ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
-    cat >&2 <<'EOF'
-当前系统缺少 Python 虚拟环境组件。请在终端执行：
-
-  sudo apt update
-  sudo apt install -y python3-venv python3-pip
-
-完成后，再重新执行本脚本。
-EOF
+    echo "python3-venv 仍不可用。请重新运行本脚本，或联系系统管理员。" >&2
     exit 2
 fi
 
@@ -89,14 +150,25 @@ pip_install() {
 pip_install --upgrade pip setuptools wheel
 pip_install -r "$ROOT/requirements-manual.txt"
 
-"$PYTHON" - <<'PY'
+JOTMARK_MANUAL_ONLY=1 "$PYTHON" - <<'PY'
 import cv2
 import numpy
 from PIL import Image
 from PySide6.QtWidgets import QApplication
+import main
+from jotmark.data.exporter import Exporter
+from ui.annotation_tree_widget import AnnotationTreeWidget
+from ui.attribute_widgets import AttributeScopeDialog, BooleanValuePicker
 
 print("手工标注环境检查通过")
 print("PySide6、OpenCV、NumPy、Pillow 已安装")
+assert main.MANUAL_ONLY, "手工版必须以 JOTMARK_MANUAL_ONLY=1 启动"
+assert hasattr(Exporter, "save_curvelanes"), "缺少 CurveLanes 折线导出器"
+assert hasattr(AnnotationTreeWidget, "show_class_context_menu_for_item"), "缺少类别右键菜单"
+assert hasattr(AnnotationTreeWidget, "show_annotation_context_menu_for_item"), "缺少标注右键改类菜单"
+assert BooleanValuePicker is not None, "缺少是/否属性选择控件"
+assert hasattr(AttributeScopeDialog, "_current_visibility_signature"), "缺少单选属性重复修改修复"
+print("手工模式、CurveLanes、右侧标注改类、属性选择检查通过")
 PY
 
 echo

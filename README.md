@@ -4,13 +4,15 @@ JotMark 是一个本地图像标注与 YOLO 训练桌面工具。本仓库是从
 
 > 模型权重、训练数据、训练结果和本地运行环境均不随仓库分发。请按本文部署后自行放置权重。
 
-> 只需要人工标注、并且部署电脑没有显卡或编程环境时，请使用手工标注版：Linux/Ubuntu 请见[部署指南](docs/手工标注版部署指南.md)，Windows 10/11 请见 [Windows 部署指南](docs/Windows手工标注版部署指南.md)。它启动时不会导入或加载 PyTorch、SAM、YOLO、模型权重和训练平台。
+> 只需要人工标注、并且部署电脑没有显卡或编程环境时，请使用手工标注版：Linux/Ubuntu 请见[部署指南](docs/手工标注版部署指南.md)，Windows 10/11 请见 [Windows 部署指南](docs/Windows手工标注版部署指南.md)。Linux 版执行 `./Start-JotMark-Manual-Linux.sh` 会自动检测并配置缺失的 Python/虚拟环境；它启动时不会导入或加载 PyTorch、SAM、YOLO、模型权重和训练平台。
+
+> 要为 Conditional Lane Detection / CondLaneNet 制作车道线训练数据，请使用顶部的 `CurveLanes / CondLaneNet 折线格式`；其 `.lines.txt` 导出和训练清单生成方式见 [CurveLanes-CondLaneNet 导出与训练说明](docs/CurveLanes-CondLaneNet导出与训练.md)。
 
 ## 功能与模型范围
 
 | 模型 | 用途 | 可运行设备 | 权重发现规则 |
 | --- | --- | --- | --- |
-| SAM3 | 点提示、文本提示、选区合并的智能分割 | **仅 CUDA GPU** | `weights/sam_weights/` 中文件名含 `sam3` 的 `.pt`，推荐 `sam3.pt` |
+| SAM3 | 点提示、文本提示的智能分割 | **仅 CUDA GPU** | `weights/sam_weights/` 中文件名含 `sam3` 的 `.pt`，推荐 `sam3.pt` |
 | SAM2 / SAM2.1 | 点提示智能分割 | CUDA 或 CPU | `weights/sam_weights/` 中其他 `.pt`；文件名必须含 `tiny`、`small`、`base_plus`/`base` 或 `large`，以便匹配配置 |
 | Ultralytics YOLO | 检测、分割、姿态、OBB 的预测辅助标注 | CUDA 或 CPU | `weights/yolo*_weights/` 中的 `.pt` 或 `.onnx` |
 | TrainingPlatform | YOLO 训练、指标查看、模型导入与导出 | 取决于所选 Python / PyTorch 环境 | 在界面中选择 YOLO 权重与数据集配置 |
@@ -50,19 +52,28 @@ python3 --version
 
 ## 2. 首次安装
 
-以下步骤以仓库根目录为当前目录。创建虚拟环境后，**先安装与本机 CUDA 匹配的 PyTorch 和 torchvision**；不要把 CPU 版 PyTorch 当作 SAM3 环境。
+以下步骤以仓库根目录为当前目录。默认安装器会先审核 NVIDIA 驱动、CUDA、PyTorch、GPU 计算能力和显存：通过后安装 CUDA 版 PyTorch、桌面依赖与 SAM 源码；若电脑不满足 SAM3 的硬件条件，会明确提示原因并自动安装无模型的手工标注版，而不是留下不可用的半成品环境。
 
 ```bash
 cd /path/to/JotMark-Desktop
 
-# 创建虚拟环境；脚本会提示你先完成 PyTorch 安装
+# 一键检查硬件、安装 CUDA PyTorch、桌面端与 SAM2/SAM3 源码。
+# 默认使用 PyTorch cu118；可通过 JOTMARK_TORCH_INDEX_URL 覆盖。
 ./scripts/install_jotmark.sh
+```
 
-# 按 PyTorch 官方选择器给出的命令安装 CUDA 版 torch / torchvision，示例：
-.venv-jotmark/bin/python -m pip install torch torchvision --index-url <PYTORCH_CUDA_INDEX_URL>
+默认 SAM3 安装条件为：可用 NVIDIA CUDA 驱动（默认 cu118 建议驱动 `>= 520`）、PyTorch 可识别 CUDA、GPU 计算能力 `>= 7.0`、显存 `>= 8 GiB`。12 GiB 及以上更适合大图；8–12 GiB 会继续安装并启用 FP16 缓解显存压力，但复杂图片仍可能显存不足。未满足条件时，脚本会自动调用 `Install-JotMark-Manual-Linux.sh` 对应的手工版安装流程，并输出手工版启动命令。
 
-# 安装桌面端、YOLO、SAM2 和 SAM3 源码
-./scripts/install_jotmark.sh
+如果使用自维护的 CUDA / PyTorch 组合，可覆盖默认 wheel 源：
+
+```bash
+JOTMARK_TORCH_INDEX_URL=https://download.pytorch.org/whl/cuXXX ./scripts/install_jotmark.sh
+```
+
+如明确不希望自动安装手工版，可设置：
+
+```bash
+JOTMARK_DISABLE_MANUAL_FALLBACK=1 ./scripts/install_jotmark.sh
 ```
 
 脚本会将官方 SAM2/SAM3 源码克隆到 `.vendor/`，并以 editable 模式安装。若已在本机下载源码，可避免重复下载：

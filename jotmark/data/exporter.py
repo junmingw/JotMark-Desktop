@@ -147,6 +147,85 @@ class Exporter:
         Exporter._atomic_write_text(filepath, json.dumps(data, ensure_ascii=False, indent=2))
 
     @staticmethod
+    def _format_curvelanes_coordinate(value):
+        """Format a coordinate without losing the integer form used by CurveLanes.
+
+        CondLaneNet accepts floating-point coordinates, but the reference
+        CurveLanes conversion writes integer pixel coordinates.  Keeping exact
+        integers compact also makes exported files easy to compare with the
+        reference dataset.
+        """
+        value = float(value)
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def save_curvelanes(filepath, shapes):
+        """Save open polylines in the CondLaneNet / CurveLanes sidecar format.
+
+        The training code reads one lane per line as ``x1 y1 x2 y2 ...`` in
+        original image pixels.  It does *not* contain a class id, so labels and
+        per-instance attributes intentionally cannot be represented here.
+
+        Returns ``(written_count, skipped_count)``.  Only ``linestrip`` shapes
+        with at least two points are valid lanes; every other shape is skipped
+        instead of being converted into a closed polygon.
+        """
+        lines = []
+        skipped_count = 0
+        for shape in shapes:
+            if shape.get("type") != "linestrip":
+                skipped_count += 1
+                continue
+            points = shape.get("points", [])
+            if len(points) < 2:
+                skipped_count += 1
+                continue
+
+            values = []
+            try:
+                for point in points:
+                    if len(point) < 2:
+                        raise ValueError("point does not contain x/y")
+                    values.append(Exporter._format_curvelanes_coordinate(point[0]))
+                    values.append(Exporter._format_curvelanes_coordinate(point[1]))
+            except (TypeError, ValueError):
+                skipped_count += 1
+                continue
+            lines.append(" ".join(values))
+
+        Exporter._atomic_write_text(filepath, "\n".join(lines))
+        return len(lines), skipped_count
+
+    @staticmethod
+    def load_curvelanes(filepath):
+        """Read the open-polyline ``.lines.txt`` format used by CondLaneNet.
+
+        Blank lines are ignored.  A malformed line is rejected with a helpful
+        exception instead of silently shifting coordinate pairs.
+        """
+        polylines = []
+        with open(filepath, "r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                if len(parts) < 4 or len(parts) % 2:
+                    raise ValueError(
+                        f"第 {line_number} 行应包含至少两组 x y 坐标，实际得到 {len(parts)} 个数值"
+                    )
+                try:
+                    values = [float(value) for value in parts]
+                except ValueError as exc:
+                    raise ValueError(f"第 {line_number} 行包含非数值坐标") from exc
+                polylines.append([
+                    [values[index], values[index + 1]]
+                    for index in range(0, len(values), 2)
+                ])
+        return polylines
+
+    @staticmethod
     def save_yolo(filepath, image_width, image_height, shapes, classes_list):
         lines = []
         for s in shapes:

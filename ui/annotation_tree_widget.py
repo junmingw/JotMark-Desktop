@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QTreeWidget, QTreeWidgetItem, QColorDialog, QLineEdit, QHBoxLayout,
-    QApplication, QStyle, QAbstractItemView, QMenu
+    QApplication, QStyle, QAbstractItemView, QMenu, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QRect, QSize, QPoint
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QFont, QIcon, QPixmap
@@ -49,10 +49,12 @@ class ClassTreeItemWidget(QWidget):
         # 3. Class Name
         self.lblClassName = QLabel(self.class_name)
         self.lblClassName.setStyleSheet("font-weight: bold; background: transparent;")
+        self.lblClassName.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # 4. Count badge
         self.lblCount = QLabel(f"({self.count})" if self.count > 0 else "")
         self.lblCount.setStyleSheet("color: #64748B; font-size: 9pt; background: transparent;")
+        self.lblCount.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # 5. Hide All button
         self.btnHideAll = QPushButton()
@@ -186,6 +188,26 @@ class ClassTreeItemWidget(QWidget):
         self.btnHideAll.hide()
         super().leaveEvent(event)
 
+    def contextMenuEvent(self, event):
+        """Forward a right click from the embedded row to the tree menu.
+
+        Category rows are rendered as QWidget instances through
+        ``setItemWidget``.  Such a widget can consume the context-menu event
+        before QTreeWidget's ``customContextMenuRequested`` signal sees it,
+        especially on Windows.  Handling it here keeps rename/delete usable
+        in the lightweight manual edition as well as the full application.
+        """
+        self.parent_tree.show_class_context_menu_for_item(self.item, event.globalPos())
+        event.accept()
+
+    def mousePressEvent(self, event):
+        """Make clicks on an embedded category row behave like tree clicks."""
+        if event.button() == Qt.LeftButton:
+            self.parent_tree.activate_tree_item(self.item, event.modifiers())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 class AnnotationTreeItemWidget(QWidget):
     def __init__(self, item, shape, idx, parent_tree):
@@ -195,6 +217,7 @@ class AnnotationTreeItemWidget(QWidget):
         self.idx = idx
         self.parent_tree = parent_tree
         self.is_visible = shape.isVisible()
+        self._drag_start_pos = None
 
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setMouseTracking(True)
@@ -210,11 +233,13 @@ class AnnotationTreeItemWidget(QWidget):
         self.indicatorBar.setFixedWidth(3)
         self.indicatorBar.setFixedHeight(14)
         self.indicatorBar.setStyleSheet("background-color: transparent;")
+        self.indicatorBar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # 1. Text Label
         text = self.parent_tree.get_shape_info_text(self.idx, self.shape)
         self.lblText = QLabel(text)
         self.lblText.setStyleSheet("color: #94A3B8; background: transparent; padding-left: 4px;")
+        self.lblText.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # 2. Hide button
         self.btnHide = QPushButton()
@@ -305,6 +330,37 @@ class AnnotationTreeItemWidget(QWidget):
         self.parent_tree.highlight_shape_on_canvas(self.shape, False)
         super().leaveEvent(event)
 
+    def mousePressEvent(self, event):
+        """Synchronize clicks on a custom annotation row to the canvas."""
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+            self.parent_tree.activate_tree_item(self.item, event.modifiers())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Start a native tree drag from the custom row when in edit mode."""
+        if (
+            self._drag_start_pos is not None
+            and event.buttons() & Qt.LeftButton
+            and (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._drag_start_pos = None
+            self.parent_tree.start_annotation_drag(self.item)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        self.parent_tree.show_annotation_context_menu_for_item(self.item, event.globalPos())
+        event.accept()
+
 
 class AnnotationTreeWidget(QWidget):
     """带搜索、添加、分级管理的标注层级结构树组件"""
@@ -331,6 +387,11 @@ class AnnotationTreeWidget(QWidget):
         self._hovered_tree_items = []
         self._class_items = {}  # {class_name: QTreeWidgetItem}
         self._shape_items = {}  # {shape: QTreeWidgetItem}
+        # A snapshot of the current canvas annotations.  Top-level category
+        # changes rebuild QTreeWidgetItems, so this is needed to repopulate
+        # their child rows immediately instead of leaving a transient blank
+        # tree until another canvas signal happens to arrive.
+        self._last_shapes = []
         self._updating = False
 
         # 兼容 main.py 的 listWidget 接口引用
@@ -353,10 +414,12 @@ class AnnotationTreeWidget(QWidget):
         self.searchInput.setClearButtonEnabled(True)
         layout.addWidget(self.searchInput)
 
-        # 2. Add class bar
-        add_bar = QHBoxLayout()
-        add_bar.setContentsMargins(0, 0, 0, 0)
-        add_bar.setSpacing(4)
+        # 2. Category actions + a dedicated full-width name field.  Keeping
+        # the editor out of the crowded action row makes long English labels
+        # readable and editable instead of truncating them between buttons.
+        action_bar = QHBoxLayout()
+        action_bar.setContentsMargins(0, 0, 0, 0)
+        action_bar.setSpacing(4)
 
         self.btnAdd = QPushButton("+")
         self.btnAdd.setObjectName("classAddBtn")
@@ -381,14 +444,19 @@ class AnnotationTreeWidget(QWidget):
 
         self.addInput = QLineEdit()
         self.addInput.setObjectName("classAddInput")
-        self.addInput.setPlaceholderText("输入新类别名...")
+        self.addInput.setPlaceholderText("输入新类别名（支持较长英文标签）...")
+        self.addInput.setClearButtonEnabled(True)
+        self.addInput.setMinimumHeight(30)
+        self.addInput.setMinimumWidth(220)
+        self.addInput.setToolTip("输入类别后按 Enter，或点击上方 + 添加。长类别名称可在此完整编辑。")
 
-        add_bar.addWidget(self.btnAdd)
-        add_bar.addWidget(self.addInput, 1)
-        add_bar.addWidget(self.btnImportClasses)
-        add_bar.addWidget(self.btnGlobalAttributes)
-        add_bar.addWidget(self.btnAttributes)
-        layout.addLayout(add_bar)
+        action_bar.addWidget(self.btnAdd)
+        action_bar.addWidget(self.btnImportClasses)
+        action_bar.addWidget(self.btnGlobalAttributes)
+        action_bar.addWidget(self.btnAttributes)
+        action_bar.addStretch(1)
+        layout.addLayout(action_bar)
+        layout.addWidget(self.addInput)
 
         # 3. Tree Widget
         self.treeWidget = QTreeWidget()
@@ -500,20 +568,37 @@ class AnnotationTreeWidget(QWidget):
                 widget.start_edit()
 
     def _show_class_context_menu(self, pos):
-        """Show destructive actions only for a top-level category."""
+        """Open a category or annotation context menu from the tree viewport."""
         item = self.treeWidget.itemAt(pos)
+        if item and item.parent():
+            self.show_annotation_context_menu_for_item(
+                item,
+                self.treeWidget.viewport().mapToGlobal(pos),
+            )
+            return
+        self.show_class_context_menu_for_item(
+            item,
+            self.treeWidget.viewport().mapToGlobal(pos),
+        )
+
+    def show_class_context_menu_for_item(self, item, global_pos):
+        """Show category actions for a top-level item at ``global_pos``."""
         if not item or item.parent():
             return
         class_name = (item.data(0, Qt.UserRole) or "").strip()
         if not class_name:
             return
 
+        # A context action applies to the category under the pointer, even if
+        # a different category or annotation row was selected beforehand.
+        self.treeWidget.setCurrentItem(item)
+
         menu = QMenu(self.treeWidget)
         rename_action = menu.addAction("重命名类别")
         attributes_action = menu.addAction("管理类别属性")
         menu.addSeparator()
         delete_action = menu.addAction("删除类别及其全部标注")
-        action = menu.exec(self.treeWidget.viewport().mapToGlobal(pos))
+        action = menu.exec(global_pos)
 
         if action == rename_action:
             widget = self.treeWidget.itemWidget(item, 0)
@@ -523,6 +608,55 @@ class AnnotationTreeWidget(QWidget):
             self.manage_attributes_requested.emit(class_name)
         elif action == delete_action:
             self.class_delete_requested.emit(class_name)
+
+    def activate_tree_item(self, item, modifiers=Qt.NoModifier):
+        """Select a row even when an embedded widget consumed the click."""
+        if not item:
+            return
+
+        extended = self.treeWidget.selectionMode() == QAbstractItemView.ExtendedSelection
+        additive = extended and bool(modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+        self.treeWidget.blockSignals(True)
+        try:
+            if additive and item.parent():
+                item.setSelected(not item.isSelected())
+                self.treeWidget.setCurrentItem(item, Qt.NoModifier)
+            else:
+                self.treeWidget.clearSelection()
+                item.setSelected(True)
+                self.treeWidget.setCurrentItem(item)
+        finally:
+            self.treeWidget.blockSignals(False)
+
+        # Apply the final (not intermediate) selection state to the canvas.
+        self._on_tree_selection_changed()
+
+    def show_annotation_context_menu_for_item(self, item, global_pos):
+        """Show reliable per-annotation class actions beside the row."""
+        if not item or not item.parent():
+            return
+        shape = item.data(0, Qt.UserRole)
+        if not shape or not hasattr(shape, "label"):
+            return
+
+        self.activate_tree_item(item)
+        menu = QMenu(self.treeWidget)
+        change_menu = menu.addMenu("修改标注类别")
+        for class_name in self._class_list:
+            action = change_menu.addAction(class_name)
+            action.setCheckable(True)
+            action.setChecked(class_name == getattr(shape, "label", ""))
+            action.setEnabled(class_name != getattr(shape, "label", ""))
+            action.setData(class_name)
+        menu.addSeparator()
+        delete_action = menu.addAction("删除此标注")
+        action = menu.exec(global_pos)
+        if action is delete_action:
+            self.delete_shape(shape)
+        elif action and action.parent() is change_menu:
+            target_class = action.data()
+            if target_class:
+                self.shape_class_reassigned.emit(shape, target_class)
 
     def rename_class_in_data(self, old_name, new_name):
         if old_name not in self._class_list:
@@ -709,6 +843,20 @@ class AnnotationTreeWidget(QWidget):
     def set_edit_mode(self, enabled):
         self.treeWidget.setDragEnabled(enabled)
         self.treeWidget.setAcceptDrops(enabled)
+        self.treeWidget.setDragDropMode(
+            QAbstractItemView.DragDrop if enabled else QAbstractItemView.NoDragDrop
+        )
+
+    def start_annotation_drag(self, item):
+        """Drag an annotation child onto a category to change its class."""
+        if not item or not item.parent():
+            return
+        shape = item.data(0, Qt.UserRole)
+        scene = shape.scene() if hasattr(shape, "scene") else None
+        if not self._is_edit_mode(scene):
+            return
+        self.activate_tree_item(item)
+        self.treeWidget.startDrag(Qt.MoveAction)
 
     def _on_tree_drop_event(self, event):
         """Reclassify dragged annotation children only while the canvas is in edit mode."""
@@ -838,6 +986,10 @@ class AnnotationTreeWidget(QWidget):
             return
         self._class_list.remove(cls_name)
         self._class_colors.pop(cls_name, None)
+        self._last_shapes = [
+            shape for shape in self._last_shapes
+            if getattr(shape, "label", "") != cls_name
+        ]
         self.refresh_tree_items()
 
     def clear_classes(self):
@@ -851,6 +1003,7 @@ class AnnotationTreeWidget(QWidget):
         # reattach an item without its custom widget, which appears as a blank
         # annotation row beneath a category.
         self._shape_items.clear()
+        self._last_shapes.clear()
         self._hovered_tree_items.clear()
 
     def get_class_list(self):
@@ -868,121 +1021,196 @@ class AnnotationTreeWidget(QWidget):
 
     # ======================== 标注层级更新逻辑 ========================
 
-    def update_annotations(self, shapes):
-        """Incrementally synchronize annotation rows without rebuilding the whole tree."""
-        grouped_shapes = {cls: [] for cls in self._class_list}
-        for s in shapes:
-            label = getattr(s, 'label', 'Unknown')
-            if label not in grouped_shapes:
-                grouped_shapes[label] = []
-            grouped_shapes[label].append(s)
+    def _group_shapes_by_class(self, shapes):
+        """Group live scene objects in their displayed order by class label."""
+        grouped = {class_name: [] for class_name in self._class_list}
+        for shape in shapes:
+            class_name = getattr(shape, "label", "") or "Unknown"
+            grouped.setdefault(class_name, []).append(shape)
+        return grouped
 
-        # New annotation labels normally arrive through MainWindow first.  Keep
-        # the view resilient if an external plugin supplies one directly.
-        missing_labels = [label for label in grouped_shapes if label not in self._class_items]
-        if missing_labels:
-            for label in missing_labels:
-                if label not in self._class_list:
-                    self._class_list.append(label)
-            self.refresh_tree_items()
-
-        active_shapes = set(shapes)
-        self.treeWidget.blockSignals(True)
-        try:
-            # Remove only rows whose shapes disappeared; unaffected row widgets
-            # keep their hover/selection state and avoid costly reconstruction.
-            for shape, child_item in list(self._shape_items.items()):
-                if shape in active_shapes:
-                    continue
-                parent = child_item.parent()
-                if parent:
-                    widget = self.treeWidget.itemWidget(child_item, 0)
-                    self.treeWidget.removeItemWidget(child_item, 0)
-                    parent.removeChild(child_item)
-                    if widget:
-                        widget.deleteLater()
+    def _clear_annotation_rows(self, parent):
+        """Remove one category's custom child rows without retaining stale Qt items."""
+        while parent.childCount():
+            child = parent.child(0)
+            shape = child.data(0, Qt.UserRole)
+            row_widget = self.treeWidget.itemWidget(child, 0)
+            if row_widget is not None:
+                self.treeWidget.removeItemWidget(child, 0)
+                row_widget.deleteLater()
+            parent.takeChild(0)
+            if shape in self._shape_items and self._shape_items[shape] is child:
                 self._shape_items.pop(shape, None)
 
-            for cls_name in self._class_list:
-                parent = self._class_items.get(cls_name)
-                if not parent:
-                    continue
-                shapes_in_class = grouped_shapes.get(cls_name, [])
+    def _category_rows_are_valid(self, parent, shapes_in_class):
+        """A setItemWidget row must never be detached and reinserted.
 
-                for index, shape in enumerate(shapes_in_class):
-                    child_item = self._shape_items.get(shape)
-                    # A category rebuild can invalidate the visual widget even
-                    # if a stale QTreeWidgetItem object still exists in Python.
-                    # Treat that mapping as absent and recreate a complete row.
-                    if child_item is not None:
-                        child_widget = self.treeWidget.itemWidget(child_item, 0)
-                        if child_item.parent() is None or not isinstance(child_widget, AnnotationTreeItemWidget):
-                            self._shape_items.pop(shape, None)
-                            child_item = None
-                    if child_item is None:
-                        child_item = QTreeWidgetItem()
-                        child_item.setData(0, Qt.UserRole, shape)
-                        parent.insertChild(index, child_item)
-                        child_widget = AnnotationTreeItemWidget(child_item, shape, index + 1, self)
-                        self.treeWidget.setItemWidget(child_item, 0, child_widget)
-                        self._shape_items[shape] = child_item
-                    else:
-                        old_parent = child_item.parent()
-                        if old_parent is not parent:
-                            if old_parent:
-                                old_parent.removeChild(child_item)
-                            parent.insertChild(index, child_item)
-                        elif parent.indexOfChild(child_item) != index:
-                            parent.takeChild(parent.indexOfChild(child_item))
-                            parent.insertChild(index, child_item)
-                        child_item.setData(0, Qt.UserRole, shape)
-                        child_widget = self.treeWidget.itemWidget(child_item, 0)
-                        if isinstance(child_widget, AnnotationTreeItemWidget):
-                            child_widget.update_shape(index + 1, shape)
+        Qt may discard the custom widget when a QTreeWidgetItem changes parent
+        or index.  Checking complete structure lets us rebuild that category
+        before a blank child item reaches the UI.
+        """
+        if parent.childCount() != len(shapes_in_class):
+            return False
+        for index, shape in enumerate(shapes_in_class):
+            child = parent.child(index)
+            row_widget = self.treeWidget.itemWidget(child, 0)
+            if (
+                child.data(0, Qt.UserRole) is not shape
+                or self._shape_items.get(shape) is not child
+                or not isinstance(row_widget, AnnotationTreeItemWidget)
+            ):
+                return False
+        return True
 
-                parent_widget = self.treeWidget.itemWidget(parent, 0)
-                if isinstance(parent_widget, ClassTreeItemWidget):
-                    count = len(shapes_in_class)
-                    parent_widget.count = count
-                    parent_widget.lblCount.setText(f"({count})" if count else "")
-                    parent_widget.update_caret_icon()
+    def _rebuild_annotation_rows(self, parent, shapes_in_class):
+        """Create fresh items and row widgets for one category atomically."""
+        self._clear_annotation_rows(parent)
+        for index, shape in enumerate(shapes_in_class, start=1):
+            child = QTreeWidgetItem(parent)
+            child.setData(0, Qt.UserRole, shape)
+            child.setFlags(child.flags() | Qt.ItemIsDragEnabled)
+            row_widget = AnnotationTreeItemWidget(child, shape, index, self)
+            self.treeWidget.setItemWidget(child, 0, row_widget)
+            self._shape_items[shape] = child
+
+    def _sync_annotation_rows(self, grouped_shapes):
+        """Synchronize child annotation rows while never moving custom rows."""
+        for class_name in self._class_list:
+            parent = self._class_items.get(class_name)
+            if parent is None:
+                continue
+            shapes_in_class = grouped_shapes.get(class_name, [])
+
+            # Structural updates (new/deleted/reordered/reclassified shapes)
+            # rebuild only the affected category.  Geometry edits retain their
+            # row widgets and only refresh their visible text.
+            if not self._category_rows_are_valid(parent, shapes_in_class):
+                self._rebuild_annotation_rows(parent, shapes_in_class)
+            else:
+                for index, shape in enumerate(shapes_in_class, start=1):
+                    row_widget = self.treeWidget.itemWidget(parent.child(index - 1), 0)
+                    row_widget.update_shape(index, shape)
+
+            parent_widget = self.treeWidget.itemWidget(parent, 0)
+            if isinstance(parent_widget, ClassTreeItemWidget):
+                count = len(shapes_in_class)
+                parent_widget.count = count
+                parent_widget.lblCount.setText(f"({count})" if count else "")
+                parent_widget.class_visible = all(shape.isVisible() for shape in shapes_in_class)
+                parent_widget.update_eye_icon()
+                parent_widget.update_caret_icon()
+
+    def update_annotations(self, shapes):
+        """Synchronize the category tree with the canvas without blank rows."""
+        self._last_shapes = list(shapes)
+        grouped_shapes = self._group_shapes_by_class(self._last_shapes)
+
+        # New labels normally arrive through MainWindow.  Keep external scene
+        # changes safe by creating their category before any row is rendered.
+        missing_labels = [
+            class_name for class_name in grouped_shapes
+            if class_name not in self._class_items
+        ]
+        if missing_labels:
+            for class_name in missing_labels:
+                if class_name not in self._class_list:
+                    self._class_list.append(class_name)
+            self.refresh_tree_items()
+            grouped_shapes = self._group_shapes_by_class(self._last_shapes)
+
+        self.treeWidget.blockSignals(True)
+        try:
+            self._sync_annotation_rows(grouped_shapes)
         finally:
             self.treeWidget.blockSignals(False)
 
-        active_shape = next((shape for shape in shapes if shape.isSelected()), None)
+        active_shape = next((shape for shape in self._last_shapes if shape.isSelected()), None)
         if active_shape:
             self.select_item_by_shape(active_shape)
         else:
             self.update_widgets_selection_state()
 
     def refresh_tree_items(self):
-        """主要在类列表发生纯类目变动（加载、增删类目等）时重构 Top-level Class 类目项"""
-        self.treeWidget.clear()
-        self._class_items.clear()
-        self._shape_items.clear()
+        """Rebuild category parents and immediately restore every annotation row.
 
-        for cls_name in self._class_list:
-            item = QTreeWidgetItem(self.treeWidget)
-            item.setData(0, Qt.UserRole, cls_name)
-            self._class_items[cls_name] = item
-
-            parent_widget = ClassTreeItemWidget(
-                item=item,
-                class_name=cls_name,
-                color=self.get_class_color(cls_name),
-                count=0,
-                parent_tree=self
+        ``QTreeWidgetItem`` objects carrying a QWidget cannot safely survive a
+        clear/reparent operation.  Recreating parents and children together
+        prevents the intermittent blank entries seen after class operations.
+        """
+        selected_shape = None
+        selected_class = None
+        selected_items = self.treeWidget.selectedItems()
+        if selected_items:
+            selected_item = selected_items[0]
+            selected_shape = selected_item.data(0, Qt.UserRole) if selected_item.parent() else None
+            selected_class = (
+                selected_item.parent().data(0, Qt.UserRole)
+                if selected_item.parent() else selected_item.data(0, Qt.UserRole)
             )
-            self.treeWidget.setItemWidget(item, 0, parent_widget)
+
+        previous_expansion = {
+            class_name: item.isExpanded()
+            for class_name, item in self._class_items.items()
+            if item is not None
+        }
+        grouped_shapes = self._group_shapes_by_class(self._last_shapes)
+
+        self.treeWidget.blockSignals(True)
+        try:
+            self.treeWidget.clear()
+            self._class_items.clear()
+            self._shape_items.clear()
+
+            for class_name in self._class_list:
+                shapes_in_class = grouped_shapes.get(class_name, [])
+                parent = QTreeWidgetItem(self.treeWidget)
+                parent.setData(0, Qt.UserRole, class_name)
+                parent.setFlags(parent.flags() | Qt.ItemIsDropEnabled)
+                parent.setExpanded(previous_expansion.get(class_name, bool(shapes_in_class)))
+                self._class_items[class_name] = parent
+                parent_widget = ClassTreeItemWidget(
+                    item=parent,
+                    class_name=class_name,
+                    color=self.get_class_color(class_name),
+                    count=len(shapes_in_class),
+                    parent_tree=self,
+                )
+                self.treeWidget.setItemWidget(parent, 0, parent_widget)
+
+            self._sync_annotation_rows(grouped_shapes)
+
+            if selected_shape in self._shape_items:
+                selected_item = self._shape_items[selected_shape]
+                self.treeWidget.setCurrentItem(selected_item)
+                selected_item.setSelected(True)
+            elif selected_class in self._class_items:
+                selected_item = self._class_items[selected_class]
+                self.treeWidget.setCurrentItem(selected_item)
+                selected_item.setSelected(True)
+        finally:
+            self.treeWidget.blockSignals(False)
 
     # ======================== 子控件业务桥接 ========================
 
     def delete_shape(self, shape):
-        """子删除图标触发"""
+        """Delete one annotation after a concise user confirmation."""
         scene = shape.scene()
-        if scene:
-            scene.removeItem(shape)
-            scene.state_changed.emit()
+        if not scene:
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("删除标注")
+        dialog.setText("确定删除此标注？")
+        delete_button = dialog.addButton("删除", QMessageBox.DestructiveRole)
+        cancel_button = dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        if dialog.clickedButton() is not delete_button:
+            return
+
+        scene.removeItem(shape)
+        scene.state_changed.emit()
 
     def toggle_class_shapes_visibility(self, class_name, visible):
         """大类一键隐藏/显示"""

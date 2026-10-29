@@ -46,10 +46,13 @@ class FormatSelectorWidget(QWidget):
         self.act_json = QAction("JSON 格式", self)
         self.act_yolo = QAction("YOLO 格式", self)
         self.act_xml = QAction("XML 格式", self)
+        self.act_curvelanes = QAction("CurveLanes / CondLaneNet 折线格式", self)
 
         self.menu.addAction(self.act_json)
         self.menu.addAction(self.act_yolo)
         self.menu.addAction(self.act_xml)
+        self.menu.addSeparator()
+        self.menu.addAction(self.act_curvelanes)
 
         self.btn.setMenu(self.menu)
 
@@ -58,6 +61,9 @@ class FormatSelectorWidget(QWidget):
         self.act_json.triggered.connect(lambda: self._on_format_selected("json", "　JSON 格式 ▾"))
         self.act_yolo.triggered.connect(lambda: self._on_format_selected("yolo", "　YOLO 格式 ▾"))
         self.act_xml.triggered.connect(lambda: self._on_format_selected("xml", "　XML 格式 ▾"))
+        self.act_curvelanes.triggered.connect(
+            lambda: self._on_format_selected("curvelanes", "　CurveLanes 折线 ▾")
+        )
 
     def _on_format_selected(self, fmt, text):
         self.btn.setText(text)
@@ -75,6 +81,8 @@ class FormatSelectorWidget(QWidget):
             self.btn.setText("　YOLO 格式 ▾")
         elif fmt == "xml":
             self.btn.setText("　XML 格式 ▾")
+        elif fmt == "curvelanes":
+            self.btn.setText("　CurveLanes 折线 ▾")
             
     def set_icon_only(self, icon_only):
         if icon_only:
@@ -263,8 +271,12 @@ class CanvasView(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Enlarged images need a precise way to reach edge details.  Qt only
+        # shows these bars when the transformed scene exceeds the viewport.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.horizontalScrollBar().setToolTip("拖动查看图片左侧或右侧区域")
+        self.verticalScrollBar().setToolTip("拖动查看图片顶部或底部区域")
         self.setMouseTracking(True)
         self.setAlignment(Qt.AlignCenter)
         self.setDragMode(QGraphicsView.NoDrag)
@@ -272,6 +284,19 @@ class CanvasView(QGraphicsView):
 
         self._is_panning = False
         self._pan_start_pos = None
+        self._user_zoomed = False
+
+    def _apply_zoom(self, factor):
+        """Zoom while preserving the user's pan/scrollbar navigation state."""
+        self.scale(factor, factor)
+        self._user_zoomed = True
+
+    def reset_to_fit(self):
+        """Fit a newly opened image and reset edge-navigation scroll ranges."""
+        scene = self.scene()
+        if scene and scene.sceneRect().width() > 0:
+            self.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
+        self._user_zoomed = False
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
@@ -279,9 +304,9 @@ class CanvasView(QGraphicsView):
             zoom_in_factor = 1.15
             zoom_out_factor = 1.0 / zoom_in_factor
             if event.angleDelta().y() > 0:
-                self.scale(zoom_in_factor, zoom_in_factor)
+                self._apply_zoom(zoom_in_factor)
             else:
-                self.scale(zoom_out_factor, zoom_out_factor)
+                self._apply_zoom(zoom_out_factor)
         else:
             # 普通滚轮：滚动画布（仅放大后才生效，未放大时滚动条范围为 0 自动无效）
             # 垂直滚动
@@ -339,10 +364,10 @@ class CanvasView(QGraphicsView):
         super().enterEvent(event)
 
     def resizeEvent(self, event):
-        """窗口大小变化时自适应图片（仅改变视图变换，不影响标注坐标）"""
+        """Fit only untouched views; never discard a user's zoom/pan state."""
         super().resizeEvent(event)
         scene = self.scene()
-        if scene and scene.sceneRect().width() > 0:
+        if not self._user_zoomed and scene and scene.sceneRect().width() > 0:
             self.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
 
 
@@ -529,7 +554,7 @@ class Ui_MainWindow(object):
 
         self.btnMergeSam = QToolButton()
         self.btnMergeSam.setIcon(self.set_icon_color(QIcon("ui/icon/merge.svg"), self.current_icon_color))
-        self.btnMergeSam.setToolTip("SAM3 合并选中标注")
+        self.btnMergeSam.setToolTip("精确合并选中的闭合区域")
         self.btnMergeSam.setFixedSize(36, 36)
         self.btnMergeSam.setCheckable(True)
         self.btnMergeSam.setEnabled(False)
@@ -673,6 +698,16 @@ class Ui_MainWindow(object):
         self.labelFiles = QLabel("文件列表")
         self.labelFiles.setObjectName("labelFiles")
         self.labelFiles.setStyleSheet("font-weight: bold;")
+
+        # Keep paths out of the compact file list.  The controller stores the
+        # complete path in the item data role and this button only controls
+        # whether names such as ``image.jpg`` show their extension.
+        self.btnFileExtensions = QPushButton("后缀")
+        self.btnFileExtensions.setObjectName("btnFileExtensions")
+        self.btnFileExtensions.setCheckable(True)
+        self.btnFileExtensions.setCursor(Qt.PointingHandCursor)
+        self.btnFileExtensions.setFixedSize(38, 22)
+        self.btnFileExtensions.setToolTip("显示或隐藏图片文件后缀")
         
         self.labelSelectedCount = QLabel("(已选 0/0)")
         self.labelSelectedCount.setObjectName("labelSelectedCount")
@@ -686,6 +721,7 @@ class Ui_MainWindow(object):
         filesHeaderLayout.addWidget(self.btnOverwrite)
         filesHeaderLayout.addWidget(self.btnDeleteFiles)
         filesHeaderLayout.addWidget(self.labelFiles)
+        filesHeaderLayout.addWidget(self.btnFileExtensions)
         filesHeaderLayout.addWidget(self.labelSelectedCount)
         filesHeaderLayout.addWidget(self.labelAnnotatedCount)
         filesHeaderLayout.addStretch()

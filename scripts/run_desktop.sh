@@ -54,6 +54,12 @@ fi
 export XDG_CONFIG_HOME="$RUNTIME_DIR/config"
 export JOTMARK_DEVICE="${JOTMARK_DEVICE:-${LABELPAW_DEVICE:-auto}}"
 
+# SAM3 on 11 GB GPUs performs several large, short-lived allocations while
+# encoding the 1008x1008 image embedding.  Expandable allocator segments make
+# those allocations less sensitive to fragmentation.  Keep an explicit user
+# setting unchanged for operators who need a different PyTorch allocator mode.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # The supplied environment is a Conda clone. Prefer its C++ runtime while
 # preserving any caller-provided library search path.
 if [[ -d "$ENV_DIR/lib" ]]; then

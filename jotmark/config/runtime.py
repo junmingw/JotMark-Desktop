@@ -27,9 +27,22 @@ def resolve_device() -> str:
 
 
 def inference_context(device: str):
-    """Use BF16 autocast only on CUDA; CPU keeps standard precision."""
+    """Use the lowest broadly supported CUDA autocast precision.
+
+    Ampere (compute capability 8.0+) supports BF16 efficiently.  Turing GPUs
+    such as the RTX 2080 Ti do not; requesting BF16 there can keep larger
+    temporary buffers alive during SAM3 image encoding.  FP16 is natively
+    supported on those cards and substantially reduces peak activation memory.
+    """
     if device == "cuda":
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        try:
+            capability_major, _ = torch.cuda.get_device_capability(0)
+            dtype = torch.bfloat16 if capability_major >= 8 else torch.float16
+        except Exception:
+            # CUDA was selected but querying properties unexpectedly failed.
+            # Keep the historical BF16 default rather than preventing startup.
+            dtype = torch.bfloat16
+        return torch.autocast(device_type="cuda", dtype=dtype)
     return nullcontext()
 
 

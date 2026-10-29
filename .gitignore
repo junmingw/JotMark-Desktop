@@ -13,6 +13,14 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.*
+
+# Local credentials and agent/editor state must never enter a release archive.
+.aws/
+.agents/
+.codex/
+*.pem
+*.key
 
 # OS/editor
 .DS_Store

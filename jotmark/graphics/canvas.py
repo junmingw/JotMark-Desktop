@@ -56,6 +56,7 @@ class Canvas(QGraphicsScene):
     shape_label_clicked = Signal(object)
     state_changed = Signal()
     canvas_item_hovered = Signal(object, bool)
+    merge_selection_cancel_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -405,7 +406,8 @@ class Canvas(QGraphicsScene):
             ]
             clicked_was_selected = clicked_shape in selected_before
 
-            if clicked_label and event.button() == Qt.LeftButton and self.mode == CanvasMode.EDIT:
+            if (clicked_label and event.button() == Qt.LeftButton
+                    and self.mode == CanvasMode.EDIT and not self.merge_selection_mode):
                 for item in selected_before:
                     if item != clicked_shape:
                         item.setSelected(False)
@@ -419,7 +421,9 @@ class Canvas(QGraphicsScene):
             # 自定义选中逻辑
             if event.button() == Qt.LeftButton:
                 if self.merge_selection_mode:
-                    if (event.modifiers() & Qt.ControlModifier) and clicked_was_selected:
+                    # Merge selection is a toggle list.  Clicking a selected
+                    # region again removes it without requiring Ctrl.
+                    if clicked_was_selected:
                         clicked_shape.setSelected(False)
                     else:
                         for item in selected_before:
@@ -443,8 +447,11 @@ class Canvas(QGraphicsScene):
             return
 
         if self.merge_selection_mode:
-            # Merge mode is intentionally selection-only: blank clicks must not
-            # start a new annotation or trigger SAM hover/click inference.
+            # Blank click is an explicit safe cancellation gesture: geometry
+            # remains untouched while temporary merge selection is discarded.
+            for item in self.selectedItems():
+                item.setSelected(False)
+            self.merge_selection_cancel_requested.emit()
             return
 
         # ---------------- SAM 确认生成 (仅限点击在空白处时触发) ----------------
@@ -650,6 +657,12 @@ class Canvas(QGraphicsScene):
                 self.finish_poly_shape()
         elif key == Qt.Key_Escape:
             self.cancel_drawing()
+            if self.merge_selection_mode:
+                for item in self.selectedItems():
+                    item.setSelected(False)
+                self.merge_selection_cancel_requested.emit()
+                event.accept()
+                return
         elif key in [Qt.Key_Z, Qt.Key_X, Qt.Key_C, Qt.Key_V]:
             items = self.selectedItems()
             if items and isinstance(items[0], RotatedRectShape):

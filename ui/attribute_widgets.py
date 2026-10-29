@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -172,6 +172,71 @@ class AttributeValuePickerButton(QPushButton):
             self.value_changed.emit(self.current_value)
 
 
+class BooleanValuePicker(QWidget):
+    """Explicit three-state boolean editor: unset, yes, or no.
+
+    A lone checkbox makes an unchecked value ambiguous: it can mean either
+    "no" or "not filled".  Two exclusive buttons keep false as an actual
+    saved value while leaving both buttons unselected for a new annotation.
+    """
+
+    value_changed = Signal(object)
+
+    def __init__(self, value=None, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.yes_button = QPushButton("是")
+        self.no_button = QPushButton("否")
+        self.clear_button = QPushButton("清除")
+        for button in (self.yes_button, self.no_button):
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setMinimumHeight(28)
+            button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px; padding: 4px 10px; border: 1px solid #94A3B8;
+                    border-radius: 5px; background: transparent;
+                }
+                QPushButton:hover { border-color: #3B82F6; background: rgba(59, 130, 246, 0.10); }
+                QPushButton:checked { color: white; border-color: #2563EB; background: #2563EB; font-weight: 600; }
+            """)
+        self.clear_button.setCursor(Qt.PointingHandCursor)
+        self.clear_button.setMinimumHeight(28)
+        self.clear_button.setToolTip("恢复为未选择")
+        self.clear_button.setStyleSheet("QPushButton { border: none; color: #64748B; padding: 4px 6px; } QPushButton:hover { color: #2563EB; }")
+
+        self.group.addButton(self.yes_button)
+        self.group.addButton(self.no_button)
+        layout.addWidget(self.yes_button)
+        layout.addWidget(self.no_button)
+        layout.addWidget(self.clear_button)
+        layout.addStretch(1)
+
+        if value is True:
+            self.yes_button.setChecked(True)
+        elif value is False:
+            self.no_button.setChecked(True)
+
+        self.yes_button.clicked.connect(lambda: self.value_changed.emit(True))
+        self.no_button.clicked.connect(lambda: self.value_changed.emit(False))
+        self.clear_button.clicked.connect(self._clear)
+
+    def _clear(self):
+        # An exclusive QButtonGroup will not normally allow clearing the last
+        # checked button. Temporarily relax exclusivity for this explicit user
+        # action, then restore it for the two value buttons.
+        self.group.setExclusive(False)
+        self.yes_button.setChecked(False)
+        self.no_button.setChecked(False)
+        self.group.setExclusive(True)
+        self.value_changed.emit("")
+
+
 class AttributeScopeDialog(QDialog):
     """Popup list of all public or class-scoped properties for one annotation."""
 
@@ -182,6 +247,7 @@ class AttributeScopeDialog(QDialog):
         self.setWindowTitle(title)
         self.resize(380, 520)
         self._refresh_scheduled = False
+        self._visibility_signature = None
 
         layout = QVBoxLayout(self)
         hint = QLabel("点击属性当前值即可打开完整选项列表；双击属性名称可修改标签。")
@@ -217,8 +283,33 @@ class AttributeScopeDialog(QDialog):
         nodes = self.editor._schemas.get(self.scope, [])
         if not nodes:
             self.form.addRow(QLabel("当前没有可用属性。"))
+            self._visibility_signature = ()
             return
         self._add_nodes(nodes)
+        self._visibility_signature = self._current_visibility_signature()
+
+    def _current_visibility_signature(self):
+        """Return the currently visible schema-node sequence.
+
+        A value change only needs to rebuild this dialog if it adds or removes
+        child rows.  Rebuilding after every single-select change deletes the
+        active picker button and can make a second click unreliable on some
+        Qt platform backends.
+        """
+        values = self.editor._shape.attributes if self.editor._shape else {}
+        visible_ids = []
+
+        def collect(nodes):
+            for node in nodes:
+                node_id = node.get("id")
+                if not node_id:
+                    continue
+                visible_ids.append(node_id)
+                if self.editor._has_value(values.get(node_id)):
+                    collect(node.get("children", []))
+
+        collect(self.editor._schemas.get(self.scope, []))
+        return tuple(visible_ids)
 
     def _add_nodes(self, nodes, depth=0):
         values = self.editor._shape.attributes if self.editor._shape else {}
@@ -236,6 +327,10 @@ class AttributeScopeDialog(QDialog):
 
     def _schedule_refresh(self, _shape):
         if self._refresh_scheduled or not self.isVisible():
+            return
+        # Scalar edits (e.g. red -> blue) are already painted by their own
+        # picker. Keep that widget alive so it can be clicked repeatedly.
+        if self._visibility_signature == self._current_visibility_signature():
             return
         self._refresh_scheduled = True
         QTimer.singleShot(0, self._rebuild)
@@ -546,7 +641,8 @@ class AnnotationAttributeEditor(QWidget):
     @staticmethod
     def _has_value(value):
         if isinstance(value, bool):
-            return value
+            # False is an explicit answer ("否"), not an empty value.
+            return True
         return value is not None and value != "" and value != []
 
     def _rebuild_form(self):
@@ -650,9 +746,11 @@ class AnnotationAttributeEditor(QWidget):
             )
             return widget
         if node_type == "boolean":
-            widget = QCheckBox("是")
-            widget.setChecked(bool(value))
-            widget.toggled.connect(lambda checked, key=node_id, current_scope=scope: self._set_value(key, checked, current_scope))
+            widget = BooleanValuePicker(value)
+            widget.value_changed.connect(
+                lambda selected, key=node_id, current_scope=scope:
+                self._set_value(key, selected, current_scope)
+            )
             return widget
         if node_type == "number":
             # A line edit keeps "not filled" distinct from 0, which a spin box

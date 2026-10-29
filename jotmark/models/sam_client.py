@@ -137,6 +137,15 @@ class Sam3InferenceWorker(QThread):
                 if task_type == 'set_image':
                     image_path, request_id = data
                     try:
+                        # Drop the previous image embedding before allocating
+                        # the next 1008x1008 SAM3 feature pyramid.  On 11 GB
+                        # Turing cards the model itself leaves little room for
+                        # a second cached feature map; returning inactive
+                        # allocator blocks here avoids a needless OOM while
+                        # switching images.
+                        self.inference_state = None
+                        if self.device == "cuda" and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                         with Image.open(image_path) as image:
                             pil_img = image.convert("RGB")
                         with torch.inference_mode(), inference_context(self.device):
