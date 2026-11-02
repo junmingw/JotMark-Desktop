@@ -93,9 +93,11 @@
 
 | 属性名 | 类型 | 建议值 |
 | --- | --- | --- |
-| `visibility` | 单选 | `visible`、`partly_occluded`、`uncertain` |
+| `visibility` | 多选 | `visible`、`partly_occluded`、`partly_truncated`、`uncertain` |
 | `source` | 单选 | `painted`、`faded`、`repaired` |
 | `review` | 单选 | `normal`、`need_review` |
+
+`visibility` 用于记录目标的可见性状态，可同时勾选 `partly_occluded`（部分遮挡）和 `partly_truncated`（部分截断，即标记延伸至图像边界外）。`visible` 表示无明显遮挡或截断且可可靠判定；通常不应与前两项同时选择。无法可靠判断时选择 `uncertain`。
 
 ### `boundary` 专属属性建议
 

@@ -1,6 +1,7 @@
 import sys
 import os
 import shutil
+import re
 from datetime import datetime
 from contextlib import nullcontext
 
@@ -8,6 +9,10 @@ from contextlib import nullcontext
 # Evaluate this before importing optional AI/training modules.  The manual
 # deployment uses only PySide6, OpenCV, NumPy and Pillow.
 MANUAL_ONLY = os.environ.get("JOTMARK_MANUAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
+# Full desktop builds start in manual mode by default.  Set this explicitly
+# only when a workstation is dedicated to AI-assisted annotation and the
+# operator accepts loading the configured default model at startup.
+AUTOLOAD_ASSISTANT = os.environ.get("JOTMARK_AUTOLOAD_ASSISTANT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 # ============================================================
 # PyInstaller 打包运行环境资源路径适配
@@ -1103,8 +1108,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.annotation_output_dir = settings.value("annotation_output_dir", "") or ""
         extension_setting = settings.value("show_file_extensions", False)
         self.show_file_extensions = str(extension_setting).strip().lower() in {"1", "true", "yes", "on"}
+        self.file_sort_key = str(settings.value("file_sort_key", "name") or "name")
+        if self.file_sort_key not in {"name", "modified", "size"}:
+            self.file_sort_key = "name"
+        sort_descending_setting = settings.value("file_sort_descending", False)
+        self.file_sort_descending = str(sort_descending_setting).strip().lower() in {"1", "true", "yes", "on"}
         self.btnFileExtensions.setChecked(self.show_file_extensions)
         self._update_file_extension_button()
+        self._update_file_sort_button()
         self.class_list = []
         self.current_format = "json"
         self.yolo_filtered_class_ids = []
@@ -1112,6 +1123,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.sam_merge_label = None
         self._enforcing_sam_merge_selection = False
         self._sam_image_request_id = None
+        self._enable_sam_after_model_load = False
 
         # Coalesce high-frequency UI/state changes.  A short delay preserves
         # safety while avoiding a disk write and full tree rebuild per drag.
@@ -1174,14 +1186,22 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if self.manual_only:
             self._configure_manual_annotation_mode()
         else:
-            # 只有发现本地模型权重时才尝试加载默认模型。
+            # Do not load SAM/YOLO at startup.  The application must stay
+            # usable for manual annotation when no model file, CUDA device or
+            # compatible GPU is available.
             self._init_model_selector()
-            if "sam3" in SAM_MODEL_MAP:
-                self.on_model_selected("sam3")
-            elif SAM_MODEL_MAP:
-                self.on_model_selected(next(iter(SAM_MODEL_MAP)))
-            else:
-                self.update_model_status(False, "未发现辅助模型；可直接使用手动标注。")
+            self._set_model_selector_idle_ui()
+            self.btnModelSelector.show()
+            self.scene.set_sam_enabled(False)
+            self.helpLabel.setText("手工标注已就绪；需要智能辅助时点击“加载辅助模型”。")
+            self.helpLabel.setStyleSheet("color: #16A34A;")
+            if AUTOLOAD_ASSISTANT:
+                if "sam3" in SAM_MODEL_MAP:
+                    self.on_model_selected("sam3")
+                elif SAM_MODEL_MAP:
+                    self.on_model_selected(next(iter(SAM_MODEL_MAP)))
+                else:
+                    self.statusBar.showMessage("未发现可自动加载的辅助模型，已保持手工标注模式。", 6000)
         
         self.yolo_worker = None
 
@@ -1189,6 +1209,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         from PySide6.QtGui import QColor
         self.current_icon_color = QColor(15, 23, 42)
         self.btnDeleteFiles.setIcon(self.set_icon_color(QIcon("ui/icon/trash.svg"), self.current_icon_color))
+        self.btnOverwrite.setIcon(self.set_icon_color(QIcon("ui/icon/编辑.svg"), self.current_icon_color))
+        self.btnFileExtensions.setIcon(self.set_icon_color(QIcon("ui/icon/格式.svg"), self.current_icon_color))
+        self.btnFileSort.setIcon(self.set_icon_color(QIcon("ui/icon/sort.svg"), self.current_icon_color))
+        for button in (self.btnOverwrite, self.btnFileExtensions, self.btnFileSort):
+            button.setIconSize(QSize(14, 14))
+            button.setStyleSheet(
+                "QPushButton { background: transparent; border: none; border-radius: 4px; padding: 3px; }"
+                "QPushButton:hover { background: rgba(59, 130, 246, 0.16); }"
+                "QPushButton:checked { background: rgba(59, 130, 246, 0.28); }"
+            )
         
         self.btnPredict.setIcon(QIcon("ui/icon/lightning-fill.svg"))
         
@@ -1295,6 +1325,23 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def _init_model_selector(self):
         self.btnModelSelector.clicked.connect(self._show_model_selector)
 
+    def _set_model_selector_idle_ui(self):
+        """Show the explicit entry point for optional AI-assisted annotation."""
+        self.btnModelSelector.setText(" 加载辅助模型 ▾")
+        self.btnModelSelector.setIcon(QIcon())
+        self.btnModelSelector.setToolTip(
+            "按需选择并加载 SAM / YOLO 辅助模型；不加载模型也可正常手工标注"
+        )
+
+    def _sam_model_is_ready(self):
+        return (
+            getattr(self.sam_client, "current_model_type", "") in {"sam2", "sam3"}
+            and getattr(self.sam_client, "model", None) is not None
+        )
+
+    def _assistant_is_ready(self):
+        return self._sam_model_is_ready() or getattr(self, "current_yolo_predictor", None) is not None
+
     def _show_model_selector(self):
         if self.manual_only:
             return
@@ -1323,12 +1370,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
         self.btnModelSelector.setText(f" {display_name} ▾")
         self.btnModelSelector.setIcon(QIcon("ui/icon/s.svg"))
+        self.btnModelSelector.setToolTip("当前辅助模型；点击可切换或重新选择模型")
         
         if key in SAM_MODEL_MAP or model_info.get("type", "").startswith("sam"):
             self.btnPredict.hide()
             self.btnClassFilter.hide()
             self.yolo_filtered_class_ids = []
             self.current_yolo_predictor = None
+            self._enable_sam_after_model_load = True
+            self.scene.set_sam_enabled(False)
+            if self.samSwitch.isChecked():
+                self.samSwitch.setChecked(False)
             if key not in SAM_MODEL_MAP:
                 SAM_MODEL_MAP[key] = model_info
             self.sam_client.load_model_by_key(key)
@@ -1336,6 +1388,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if self.scene.mode == CanvasMode.POINT:
                 self.actionRect.trigger()
         elif model_info.get("type", "").startswith("yolo"):
+            self._enable_sam_after_model_load = False
+            self.scene.set_sam_enabled(False)
+            if self.samSwitch.isChecked():
+                self.samSwitch.setChecked(False)
             self.sam_client.cleanup()
             self.sam_client.current_model_key = key
             from jotmark.models.yolo_predictor import YoloPredictor
@@ -1457,6 +1513,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.chkSelectAll.stateChanged.connect(self.on_select_all_toggled)
         self.btnDeleteFiles.clicked.connect(self.delete_checked_files)
         self.btnFileExtensions.toggled.connect(self.set_file_extension_visible)
+        self.btnFileSort.clicked.connect(self.show_file_sort_menu)
         self.btnPreviousImage.clicked.connect(self.show_previous_image)
         self.btnNextImage.clicked.connect(self.show_next_image)
         self.listFiles.itemChanged.connect(self.on_file_item_changed)
@@ -2728,6 +2785,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.btnRedo.setIcon(self.set_icon_color(QIcon("ui/icon/arrow-u-up-right.svg"), self.current_icon_color))
             self.btnDelete.setIcon(self.set_icon_color(QIcon("ui/icon/trash.svg"), self.current_icon_color))
             self.btnDeleteFiles.setIcon(self.set_icon_color(QIcon("ui/icon/trash.svg"), self.current_icon_color))
+            self.btnOverwrite.setIcon(self.set_icon_color(QIcon("ui/icon/编辑.svg"), self.current_icon_color))
+            self.btnFileExtensions.setIcon(self.set_icon_color(QIcon("ui/icon/格式.svg"), self.current_icon_color))
+            self.btnFileSort.setIcon(self.set_icon_color(QIcon("ui/icon/sort.svg"), self.current_icon_color))
             self.btnSave.setIcon(self.set_icon_color(QIcon("ui/icon/floppy-disk.svg"), self.current_icon_color))
             self.btnAnnotationOutputDir.setIcon(self.set_icon_color(QIcon("ui/icon/folder.svg"), self.current_icon_color))
             self.btnMergeSam.setIcon(self.set_icon_color(QIcon("ui/icon/merge.svg"), self.current_icon_color))
@@ -2755,6 +2815,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.btnRedo.setIcon(self.set_icon_color(QIcon("ui/icon/arrow-u-up-right.svg"), self.current_icon_color))
             self.btnDelete.setIcon(self.set_icon_color(QIcon("ui/icon/trash.svg"), self.current_icon_color))
             self.btnDeleteFiles.setIcon(self.set_icon_color(QIcon("ui/icon/trash.svg"), self.current_icon_color))
+            self.btnOverwrite.setIcon(self.set_icon_color(QIcon("ui/icon/编辑.svg"), self.current_icon_color))
+            self.btnFileExtensions.setIcon(self.set_icon_color(QIcon("ui/icon/格式.svg"), self.current_icon_color))
+            self.btnFileSort.setIcon(self.set_icon_color(QIcon("ui/icon/sort.svg"), self.current_icon_color))
             self.btnSave.setIcon(self.set_icon_color(QIcon("ui/icon/floppy-disk.svg"), self.current_icon_color))
             self.btnAnnotationOutputDir.setIcon(self.set_icon_color(QIcon("ui/icon/folder.svg"), self.current_icon_color))
             self.btnMergeSam.setIcon(self.set_icon_color(QIcon("ui/icon/merge.svg"), self.current_icon_color))
@@ -2829,65 +2892,45 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.samSwitch.setChecked(False)
             self.statusBar.showMessage("折线标注不支持 SAM 智能提取，已切换为手动绘制", 4000)
             return
+        sam_ready = self._sam_model_is_ready()
+        yolo_ready = getattr(self, "current_yolo_predictor", None) is not None
+        if checked and not (sam_ready or yolo_ready):
+            # Smart mode is opt-in, but choosing it must never start a default
+            # model or leave the canvas in a non-functional inference state.
+            self.scene.set_sam_enabled(False)
+            self.samSwitch.blockSignals(True)
+            self.samSwitch.setChecked(False)
+            self.samSwitch.blockSignals(False)
+            self.btnDrawMode.setChecked(True)
+            self.btnModelSelector.show()
+            self.helpLabel.setText("尚未加载辅助模型；请点击“加载辅助模型”，或继续手工标注。")
+            self.helpLabel.setStyleSheet("color: orange;")
+            self.statusBar.showMessage("辅助模型未加载，当前保持手工标注模式。", 5000)
+            return
 
-        if checked and self.scene.mode == CanvasMode.POINT:
-            yolo_pred = getattr(self, "current_yolo_predictor", None)
-            is_yolo_pose = yolo_pred is not None and getattr(yolo_pred, "task", "") == "pose"
-            
-            if not is_yolo_pose:
-                # 尝试寻找并加载默认的 YOLO pose 模型
-                model_base_dir = get_weights_base_dir()
-                
-                default_pose_path = None
-                default_type = ""
-                default_name = ""
-                
-                if os.path.exists(model_base_dir):
-                    for item in os.listdir(model_base_dir):
-                        item_path = os.path.join(model_base_dir, item)
-                        if os.path.isdir(item_path) and item.startswith("yolo") and item.endswith("_weights"):
-                            for f in os.listdir(item_path):
-                                if f.endswith('-pose.pt') or f.endswith('-pose.onnx'):
-                                    default_pose_path = os.path.join(item_path, f)
-                                    default_name = f.replace('.pt', '').replace('.onnx', '')
-                                    default_type = item.replace('_weights', '')
-                                    break
-                        if default_pose_path:
-                            break
-                            
-                if default_pose_path and os.path.exists(default_pose_path):
-                    self.statusBar.showMessage(f"正在为您自动切换至 {default_name} 模型...", 3000)
-                    self.on_model_selected({
-                        "key": default_name,
-                        "display_name": default_name,
-                        "type": default_type,
-                        "path": default_pose_path
-                    })
-                else:
-                    # 不再强行拦截，而是提醒用户切换模型，这样模型选择器才能显示出来
-                    self.statusBar.showMessage("当前为点标注模式，请在上方选择 YOLO 姿态模型以使用智能辅助", 4000)
-                    self.helpLabel.setText("请选择 YOLO 姿态模型")
-                    self.helpLabel.setStyleSheet("color: orange;")
-
-        self.scene.set_sam_enabled(checked)
+        # Only SAM models change the canvas into click-prompt inference mode.
+        # A loaded YOLO model uses its explicit prediction button instead.
+        self.scene.set_sam_enabled(checked and sam_ready)
         self._update_help_text(self.scene.mode)
         
         if checked:
             self.btnModelSelector.show()
-            if getattr(self, 'current_yolo_predictor', None) is not None:
+            if yolo_ready:
                 self.btnPredict.show()
                 self.btnClassFilter.show()
             if not self.btnSmartMode.isChecked():
                 self.btnSmartMode.setChecked(True)
         else:
-            self.btnModelSelector.hide()
+            # The model button stays available in manual mode so users can
+            # explicitly load a model later without first enabling Smart.
+            self.btnModelSelector.show()
             self.btnPredict.hide()
             self.btnClassFilter.hide()
             if not self.btnDrawMode.isChecked():
                 self.btnDrawMode.setChecked(True)
 
         if self.scene.mode == CanvasMode.POINT:
-            if checked:
+            if checked and (sam_ready or yolo_ready):
                 self.templateWidget.hide()
                 self.sepTemplate.hide()
             else:
@@ -3520,7 +3563,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if item and item.checkState() == Qt.Checked:
                 checked += 1
                 
-        self.labelSelectedCount.setText(f"(已选 {checked}/{total})")
+        self.labelSelectedCount.setText(f"✓ {checked}/{total}")
+        self.labelSelectedCount.setToolTip(f"已选文件：{checked}/{total}")
         
         # 动态控制可用性
         has_items = total > 0
@@ -3574,12 +3618,121 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         item.setCheckState(Qt.Unchecked)
         return item
 
+    @staticmethod
+    def _natural_filename_key(image_path):
+        """Sort filenames naturally: image_2 comes before image_10."""
+        filename = os.path.basename(image_path).casefold()
+        return tuple(
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in re.split(r"(\d+)", filename)
+        )
+
+    def _sort_image_paths(self, image_paths):
+        """Return paths using the selected persistent file-list ordering."""
+        def metadata_key(path):
+            try:
+                if self.file_sort_key == "modified":
+                    return (os.path.getmtime(path), self._natural_filename_key(path))
+                if self.file_sort_key == "size":
+                    return (os.path.getsize(path), self._natural_filename_key(path))
+            except OSError:
+                pass
+            return self._natural_filename_key(path)
+
+        return sorted(image_paths, key=metadata_key, reverse=self.file_sort_descending)
+
+    def _rebuild_file_list(self, image_paths, preferred_path=""):
+        """Reorder files without losing checked state or the current image."""
+        existing_state = {}
+        for index in range(self.listFiles.count()):
+            item = self.listFiles.item(index)
+            if item:
+                existing_state[self._file_item_path(item)] = item.checkState()
+        current_path = preferred_path or self._file_item_path(self.listFiles.currentItem())
+        selected_paths = {self._file_item_path(item) for item in self.listFiles.selectedItems()}
+        sorted_paths = self._sort_image_paths(image_paths)
+
+        signals_were_blocked = self.listFiles.blockSignals(True)
+        try:
+            self.listFiles.clear()
+            for image_path in sorted_paths:
+                item = self._create_file_list_item(image_path)
+                if image_path in existing_state:
+                    item.setCheckState(existing_state[image_path])
+                if image_path in selected_paths:
+                    item.setSelected(True)
+                self.listFiles.addItem(item)
+        finally:
+            self.listFiles.blockSignals(signals_were_blocked)
+
+        if self.listFiles.count():
+            target_row = 0
+            for index in range(self.listFiles.count()):
+                if self._file_item_path(self.listFiles.item(index)) == current_path:
+                    target_row = index
+                    break
+            self.listFiles.setCurrentRow(target_row)
+        self.update_selected_count()
+
+    def _directory_image_paths(self, directory):
+        if not directory or not os.path.isdir(directory):
+            return []
+        return [
+            os.path.join(directory, filename)
+            for filename in os.listdir(directory)
+            if filename.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)
+        ]
+
+    def _update_file_sort_button(self):
+        if not hasattr(self, "btnFileSort"):
+            return
+        labels = {"name": "文件名", "modified": "修改时间", "size": "文件大小"}
+        direction = "降序" if self.file_sort_descending else "升序"
+        self.btnFileSort.setToolTip(
+            f"当前：按{labels.get(self.file_sort_key, '文件名')}{direction}排序\n点击可更改排序方式"
+        )
+
+    def show_file_sort_menu(self):
+        """Offer compact sorting controls for the file browser."""
+        menu = QMenu(self)
+        for sort_key, label in (("name", "按文件名"), ("modified", "按修改时间"), ("size", "按文件大小")):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.file_sort_key == sort_key)
+            action.setData(("key", sort_key))
+        menu.addSeparator()
+        ascending = menu.addAction("升序")
+        ascending.setCheckable(True)
+        ascending.setChecked(not self.file_sort_descending)
+        ascending.setData(("direction", False))
+        descending = menu.addAction("降序")
+        descending.setCheckable(True)
+        descending.setChecked(self.file_sort_descending)
+        descending.setData(("direction", True))
+
+        action = menu.exec(self.btnFileSort.mapToGlobal(self.btnFileSort.rect().bottomLeft()))
+        if not action or not action.data():
+            return
+        kind, value = action.data()
+        if kind == "key":
+            self.file_sort_key = value
+        else:
+            self.file_sort_descending = bool(value)
+        settings = QSettings("luohuabuxiema", "JotMark")
+        settings.setValue("file_sort_key", self.file_sort_key)
+        settings.setValue("file_sort_descending", self.file_sort_descending)
+        self._update_file_sort_button()
+        self._rebuild_file_list([
+            self._file_item_path(self.listFiles.item(index))
+            for index in range(self.listFiles.count())
+            if self.listFiles.item(index) is not None
+        ])
+
     def _update_file_extension_button(self):
         if not hasattr(self, "btnFileExtensions"):
             return
         state = "显示" if self.show_file_extensions else "隐藏"
         next_action = "隐藏" if self.show_file_extensions else "显示"
-        self.btnFileExtensions.setText("后缀")
         self.btnFileExtensions.setToolTip(f"当前：{state}图片文件后缀；点击可{next_action}")
 
     def set_file_extension_visible(self, visible):
@@ -3674,23 +3827,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     item.setToolTip(image_path)
         finally:
             self.listFiles.blockSignals(signals_were_blocked)
-        self.labelAnnotatedCount.setText(f"(已标注 {annotated}/{total})")
+        self.labelAnnotatedCount.setText(f"● {annotated}/{total}")
+        self.labelAnnotatedCount.setToolTip(f"已标注图片：{annotated}/{total}")
 
     def open_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "选择图片目录", self.current_dir or "")
         if dir_path:
             self.current_dir = dir_path
-            self.listFiles.clear()
             self.load_classes(dir_path)
-            self.listFiles.blockSignals(True)
-            for f in os.listdir(dir_path):
-                if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS):
-                    self.listFiles.addItem(self._create_file_list_item(os.path.join(dir_path, f)))
-            self.listFiles.blockSignals(False)
-            self.update_selected_count()
-
-            if self.listFiles.count() > 0:
-                self.listFiles.setCurrentRow(0)
+            self._rebuild_file_list(self._directory_image_paths(dir_path))
 
     # def update_model_status(self, success, msg):
     #     self.helpLabel.setText(msg)
@@ -3705,8 +3850,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.clear_runtime_error()
             self.helpLabel.setText(message)
             self.helpLabel.setStyleSheet("color: green;")
-            # 模型加载成功后，检查用户是不是已经提前打开图片了
-            if self.current_image_path:
+            sam_ready = self._sam_model_is_ready()
+            # A SAM model selected through the explicit button activates
+            # Smart mode only after it genuinely finished loading.
+            if sam_ready and self._enable_sam_after_model_load:
+                self._enable_sam_after_model_load = False
+                self.samSwitch.setChecked(True)
+            # A loaded SAM model can encode the current image.  YOLO and the
+            # no-model manual state deliberately skip this expensive step.
+            if sam_ready and self.current_image_path:
                 self.request_sam_image_encoding(self.current_image_path)
         else:
             # Loading progress is intentionally emitted as a False status. It
@@ -3716,6 +3868,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.helpLabel.setText(message)
                 self.helpLabel.setStyleSheet("color: orange;")
             else:
+                self._enable_sam_after_model_load = False
                 self.set_runtime_error("模型加载失败", message)
         self.update_sam_merge_button()
 
@@ -4379,24 +4532,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         if last_dir and os.path.exists(last_dir):
             self.current_dir = last_dir
-            self.listFiles.clear()
             self.load_classes(last_dir)
-            self.listFiles.blockSignals(True)
-            target_row = -1
-            for f in os.listdir(last_dir):
-                if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS):
-                    full_path = os.path.join(last_dir, f)
-                    self.listFiles.addItem(self._create_file_list_item(full_path))
-                    if last_image and os.path.normpath(full_path) == os.path.normpath(last_image):
-                        target_row = self.listFiles.count() - 1
-            self.listFiles.blockSignals(False)
-            self.update_selected_count()
-
-            if self.listFiles.count() > 0:
-                if target_row != -1:
-                    self.listFiles.setCurrentRow(target_row)
-                else:
-                    self.listFiles.setCurrentRow(0)
+            self._rebuild_file_list(self._directory_image_paths(last_dir), last_image)
 
     def show_next_image(self):
         current_idx = self.listFiles.currentRow()

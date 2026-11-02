@@ -8,17 +8,10 @@ from PIL import Image
 
 import os
 
-try:
-    from sam3.model_builder import build_sam3_image_model
-    from sam3.model.sam3_image_processor import Sam3Processor
-except ImportError:
-    pass
-
-try:
-    from sam2.build_sam import build_sam2
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
-except ImportError:
-    pass
+# Do not import SAM2/SAM3 implementation modules here.  Importing SAM3 can
+# initialize optional attention backends and emit CUDA capability warnings even
+# when the desktop is used only for manual annotation.  Each loader imports its
+# backend lazily after the user explicitly selects that model.
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -95,6 +88,9 @@ class Sam3ModelLoadWorker(QThread):
 
     def run(self):
         try:
+            from sam3.model_builder import build_sam3_image_model
+            from sam3.model.sam3_image_processor import Sam3Processor
+
             if self.device != "cuda":
                 raise RuntimeError("官方 SAM3 当前需要 CUDA；请释放显存或在标注界面改用 SAM2 / YOLO 的 CPU 模式。")
             model = build_sam3_image_model(
@@ -318,6 +314,9 @@ class Sam2ModelLoadWorker(QThread):
 
     def run(self):
         try:
+            from sam2.build_sam import build_sam2
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+
             model = build_sam2(self.config_file, ckpt_path=self.checkpoint_path, device=self.device)
             predictor = SAM2ImagePredictor(model)
             self.loaded.emit(predictor, True, f"SAM 2.1 模型加载成功（{device_label(self.device)}）")

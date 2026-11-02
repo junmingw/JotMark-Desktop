@@ -4,10 +4,11 @@
     {
       "id": "apolloscape_visibility",
       "name": "visibility",
-      "type": "single_select",
+      "type": "multi_select",
       "options": [
         "visible",
         "partly_occluded",
+        "partly_truncated",
         "uncertain"
       ],
       "children": []

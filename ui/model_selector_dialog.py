@@ -249,6 +249,21 @@ class ModelSelectorDialog(QDialog):
         # Populate categories
         for cat in self.all_data.keys():
             self.category_list.addItem(cat)
+
+        if not self.all_data:
+            self.category_list.hide()
+            empty_hint = QLabel(
+                "未发现可用的本地辅助模型。\n\n"
+                "可直接关闭此窗口并继续手工标注。\n"
+                "如需智能辅助，请将 SAM / YOLO 权重放入权重目录后重新打开此窗口。"
+            )
+            empty_hint.setWordWrap(True)
+            empty_hint.setAlignment(Qt.AlignCenter)
+            empty_hint.setStyleSheet(
+                f"color: {list_item_text}; padding: 28px; font-size: 14px; background: transparent;"
+            )
+            self.models_layout.insertWidget(0, empty_hint)
+            return
             
         target_row = 0
         if self.current_model_key:

@@ -19,7 +19,7 @@ JotMark 是一个本地图像标注与 YOLO 训练桌面工具。本仓库是从
 | Ultralytics YOLO | 检测、分割、姿态、OBB 的预测辅助标注 | CUDA 或 CPU | `weights/yolo*_weights/` 中的 `.pt` 或 `.onnx` |
 | TrainingPlatform | YOLO 训练、指标查看、模型导入与导出 | 取决于所选 Python / PyTorch 环境 | 在界面中选择 YOLO 权重与数据集配置 |
 
-SAM3 支持短文本概念提示和点提示；SAM2 仅在本程序中提供点提示。模型列表只会在应用启动时扫描一次；复制新权重后请重启应用。
+SAM3 支持短文本概念提示和点提示；SAM2 仅在本程序中提供点提示。完整版本启动时默认不加载任何辅助模型，即使本地已有 `sam3.pt` 也不会占用显存；需要时点击工具栏的 **加载辅助模型** 再选择 SAM / YOLO。模型列表会在打开该选择器时重新扫描；复制新权重后重新打开选择器即可。
 
 ## 目录说明
 
@@ -176,7 +176,15 @@ JOTMARK_DEVICE=cpu ./scripts/run_desktop.sh
 JOTMARK_DEVICE=cuda ./scripts/run_desktop.sh
 ```
 
-提示：本项目虽会在 `JOTMARK_DEVICE=cuda` 无法使用时回退 CPU，但 SAM3 加载阶段仍会明确报错；这是预期行为。
+完整版本启动后始终先进入手工标注状态：不加载 SAM3、不解析图片特征，也不要求权重文件、CUDA 或 GPU 存在。需要智能辅助时，在工具栏点击 **加载辅助模型**，选择所需 SAM / YOLO 后才开始加载；SAM 成功加载后才会进入智能模式并解析当前图片。
+
+如某台固定用途工作站确实希望恢复启动即加载默认模型，可显式设置以下参数；默认不设置：
+
+```bash
+JOTMARK_AUTOLOAD_ASSISTANT=1 ./scripts/run_desktop.sh
+```
+
+提示：本项目虽会在 `JOTMARK_DEVICE=cuda` 无法使用时回退 CPU，但用户主动加载 SAM3 时，SAM3 仍会因不满足 CUDA 条件而明确报错；这是预期行为。此时可继续手工标注或选择其他可用模型。
 
 ## 5. 标注与训练基本流程
 

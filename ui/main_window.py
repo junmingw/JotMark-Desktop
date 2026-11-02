@@ -490,12 +490,12 @@ class Ui_MainWindow(object):
         self.btnSmartMode = QPushButton("✨ 智能")
         self.btnSmartMode.setCheckable(True)
         self.btnSmartMode.setAutoExclusive(True)        
-        # 模型选择器按钮（Smart 模式时显示）
-        self.btnModelSelector = QPushButton(" SAM 3 ▾")
+        # 按需模型加载按钮。程序启动时始终保持手工标注，不加载任何模型。
+        self.btnModelSelector = QPushButton(" 加载辅助模型 ▾")
         self.btnModelSelector.setObjectName("btnModelSelector")
         self.btnModelSelector.setCursor(Qt.PointingHandCursor)
-        self.btnModelSelector.setToolTip("切换 SAM 模型")
-        self.btnModelSelector.hide()  # 默认隐藏，Smart 激活时显示
+        self.btnModelSelector.setToolTip("按需选择并加载 SAM / YOLO 辅助模型；不加载也可正常手工标注")
+        self.btnModelSelector.hide()  # 完整版启动后由 MainWindow 显示；手工版保持隐藏
 
         self.btnPredict = QPushButton(" 预测")
         self.btnPredict.setObjectName("btnPredict")
@@ -657,24 +657,26 @@ class Ui_MainWindow(object):
         filesLayout.setContentsMargins(0, 0, 0, 0)
         filesLayout.setSpacing(6)
         
-        # 文件列表头部布局 (复选框 + 计数标签)
+        # 文件列表头部布局：紧凑图标 + 计数，完整说明通过悬停提示显示。
         self.filesHeader = QWidget()
         self.filesHeader.setObjectName("filesHeader")
         filesHeaderLayout = QHBoxLayout(self.filesHeader)
         filesHeaderLayout.setContentsMargins(0, 0, 0, 4)
         filesHeaderLayout.setSpacing(6)
         
-        self.chkSelectAll = QCheckBox("全选")
+        self.chkSelectAll = QCheckBox()
         self.chkSelectAll.setObjectName("chkSelectAll")
         self.chkSelectAll.setCursor(Qt.PointingHandCursor)
         self.chkSelectAll.setTristate(False)
+        self.chkSelectAll.setFixedSize(22, 22)
+        self.chkSelectAll.setToolTip("全选 / 取消全选文件")
 
-        self.btnOverwrite = QPushButton("覆盖")
+        self.btnOverwrite = QPushButton()
         self.btnOverwrite.setObjectName("btnOverwrite")
         self.btnOverwrite.setCheckable(True)
         self.btnOverwrite.setCursor(Qt.PointingHandCursor)
-        self.btnOverwrite.setToolTip("覆盖已有标注框")
-        self.btnOverwrite.setFixedHeight(22)
+        self.btnOverwrite.setToolTip("覆盖已有标注")
+        self.btnOverwrite.setFixedSize(22, 22)
 
         self.btnDeleteFiles = QPushButton()
         self.btnDeleteFiles.setObjectName("btnDeleteFiles")
@@ -695,19 +697,25 @@ class Ui_MainWindow(object):
             }
         """)
 
-        self.labelFiles = QLabel("文件列表")
+        self.labelFiles = QLabel("文件")
         self.labelFiles.setObjectName("labelFiles")
         self.labelFiles.setStyleSheet("font-weight: bold;")
 
         # Keep paths out of the compact file list.  The controller stores the
         # complete path in the item data role and this button only controls
         # whether names such as ``image.jpg`` show their extension.
-        self.btnFileExtensions = QPushButton("后缀")
+        self.btnFileExtensions = QPushButton()
         self.btnFileExtensions.setObjectName("btnFileExtensions")
         self.btnFileExtensions.setCheckable(True)
         self.btnFileExtensions.setCursor(Qt.PointingHandCursor)
-        self.btnFileExtensions.setFixedSize(38, 22)
+        self.btnFileExtensions.setFixedSize(22, 22)
         self.btnFileExtensions.setToolTip("显示或隐藏图片文件后缀")
+
+        self.btnFileSort = QPushButton()
+        self.btnFileSort.setObjectName("btnFileSort")
+        self.btnFileSort.setCursor(Qt.PointingHandCursor)
+        self.btnFileSort.setFixedSize(22, 22)
+        self.btnFileSort.setToolTip("排序文件列表")
         
         self.labelSelectedCount = QLabel("(已选 0/0)")
         self.labelSelectedCount.setObjectName("labelSelectedCount")
@@ -717,14 +725,15 @@ class Ui_MainWindow(object):
         self.labelAnnotatedCount.setObjectName("labelAnnotatedCount")
         self.labelAnnotatedCount.setStyleSheet("color: #16A34A; font-size: 11px;")
         
-        filesHeaderLayout.addWidget(self.chkSelectAll)
-        filesHeaderLayout.addWidget(self.btnOverwrite)
-        filesHeaderLayout.addWidget(self.btnDeleteFiles)
         filesHeaderLayout.addWidget(self.labelFiles)
-        filesHeaderLayout.addWidget(self.btnFileExtensions)
         filesHeaderLayout.addWidget(self.labelSelectedCount)
         filesHeaderLayout.addWidget(self.labelAnnotatedCount)
         filesHeaderLayout.addStretch()
+        filesHeaderLayout.addWidget(self.chkSelectAll)
+        filesHeaderLayout.addWidget(self.btnOverwrite)
+        filesHeaderLayout.addWidget(self.btnFileExtensions)
+        filesHeaderLayout.addWidget(self.btnFileSort)
+        filesHeaderLayout.addWidget(self.btnDeleteFiles)
         
         self.listFiles = QListWidget()
         self.listFiles.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -736,15 +745,17 @@ class Ui_MainWindow(object):
         filePagerLayout.setContentsMargins(0, 0, 0, 0)
         filePagerLayout.setSpacing(6)
 
-        self.btnPreviousImage = QPushButton("上一张")
+        self.btnPreviousImage = QPushButton("‹")
         self.btnPreviousImage.setObjectName("btnImagePager")
         self.btnPreviousImage.setCursor(Qt.PointingHandCursor)
         self.btnPreviousImage.setToolTip("上一张图片（Page Up）")
+        self.btnPreviousImage.setFixedSize(28, 22)
 
-        self.btnNextImage = QPushButton("下一张")
+        self.btnNextImage = QPushButton("›")
         self.btnNextImage.setObjectName("btnImagePager")
         self.btnNextImage.setCursor(Qt.PointingHandCursor)
         self.btnNextImage.setToolTip("下一张图片（Page Down）")
+        self.btnNextImage.setFixedSize(28, 22)
 
         filePagerLayout.addWidget(self.btnPreviousImage)
         filePagerLayout.addWidget(self.btnNextImage)
