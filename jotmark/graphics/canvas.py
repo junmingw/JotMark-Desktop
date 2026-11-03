@@ -61,10 +61,13 @@ class Canvas(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.mode = CanvasMode.RECT
+        self.annotation_line_width = 2
+        self.edge_click_margin = 40  # screen pixels; 0 disables off-image vertex placement
         self.img_item = None
         self._image_size = QSize()
         self._preview_scale = 1.0
         self.sam_client = None
+
         self.sam_enabled = False
         
         self.current_pose_template = None
@@ -95,6 +98,22 @@ class Canvas(QGraphicsScene):
         self.v_line.hide()
         self.addItem(self.h_line)
         self.addItem(self.v_line)
+
+    def set_annotation_line_width(self, width):
+        # Keep the runtime, the settings dialog and saved preferences on the
+        # same half-pixel grid.  QPen widthF preserves subpixel pen widths.
+        self.annotation_line_width = max(0.5, min(12.0, round(float(width) * 2) / 2))
+        for item in self.items():
+            if isinstance(item, (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)) and not getattr(item, 'is_temp', False):
+                item.set_annotation_line_width(self.annotation_line_width)
+        if self.temp_item and hasattr(self.temp_item, 'setPen'):
+            pen = self.temp_item.pen()
+            pen.setWidthF(self.annotation_line_width)
+            self.temp_item.setPen(pen)
+        elif isinstance(self.temp_item, RotatedRectShape):
+            pen = self.temp_item.rect_item.pen()
+            pen.setWidthF(self.annotation_line_width)
+            self.temp_item.rect_item.setPen(pen)
 
     def load_image(self, path):
         self.clear_shapes()
@@ -197,6 +216,26 @@ class Canvas(QGraphicsScene):
         y = max(rect.top(), min(pt.y(), rect.bottom()))
         return QPointF(x, y)
 
+    def projected_edge_vertex(self, pt):
+        """Accept an outside vertex near the visible edge, even when panned."""
+        if self.mode not in (CanvasMode.POLY, CanvasMode.LINE) or self.sam_enabled:
+            return None
+        if self.is_inside_image(pt):
+            return self.clamp_point(pt)
+        if not self.img_item or self.edge_click_margin <= 0:
+            return None
+        for view in self.views():
+            # Never turn a click outside the viewport into an annotation.
+            # The zoomed view has scrollable blank space, so scrollbar range
+            # alone must not decide whether edge projection is available.
+            if not view.viewport().rect().contains(view.mapFromScene(pt)):
+                continue
+            nearest = self.clamp_point(pt)
+            offset = view.transform().map(pt) - view.transform().map(nearest)
+            if offset.x() ** 2 + offset.y() ** 2 <= self.edge_click_margin ** 2:
+                return nearest
+        return None
+
     def update_crosshair(self, pt):
         if self.img_item:
             rect = self.sceneRect()
@@ -286,18 +325,22 @@ class Canvas(QGraphicsScene):
             if self.mode == CanvasMode.RECT:
                 self.temp_item = QGraphicsRectItem(rect)
                 self.temp_item.is_temp = True
-                self.temp_item.setPen(QPen(QColor(28, 126, 214), 2, Qt.DashLine))
+                self.temp_item.setPen(QPen(QColor(28, 126, 214), self.annotation_line_width, Qt.DashLine))
 
             # 手动拉框时，调用全新的 RotatedRectShape 参数格式
             elif self.mode == CanvasMode.RBOX:
                 cx, cy = rect.center().x(), rect.center().y()
                 w, h = max(1, rect.width()), max(1, rect.height())
                 self.temp_item = RotatedRectShape(cx, cy, w, h, 0, is_temp=True)
+                pen = self.temp_item.rect_item.pen()
+                pen.setWidthF(self.annotation_line_width)
+                self.temp_item.rect_item.setPen(pen)
 
             self.addItem(self.temp_item)
 
         elif self.mode in (CanvasMode.POLY, CanvasMode.LINE) and not (self.mode == CanvasMode.POLY and self.sam_enabled and is_sam_model) and len(self.poly_pts) > 0:
-            self.update_temp_poly(mouse_pos=clamped_pt)
+            vertex = self.projected_edge_vertex(pt)
+            self.update_temp_poly(mouse_pos=vertex if vertex is not None else None)
 
     def handle_sam_result(self, poly_pts, rect_xywh, rect_obb, score, is_click):
         """处理来自 SAM 后台的推理结果，正确区分矩形、多边形 and 旋转框"""
@@ -367,6 +410,7 @@ class Canvas(QGraphicsScene):
     def mousePressEvent(self, event):
         pt = event.scenePos()
         clamped_pt = self.clamp_point(pt)
+        edge_vertex = self.projected_edge_vertex(pt)
         
         current_model_key = getattr(self.sam_client, 'current_model_key', None) or ''
         is_yolo = current_model_key.startswith('yolo')
@@ -376,8 +420,8 @@ class Canvas(QGraphicsScene):
         clicked_label = False
         is_drawing_poly = (self.mode in (CanvasMode.POLY, CanvasMode.LINE) and len(self.poly_pts) > 0)
         
-        if not is_drawing_poly:
-            items = self.items(clamped_pt)
+        if not is_drawing_poly and self.is_inside_image(pt):
+            items = self.items(pt)
             for item in items:
                 from jotmark.graphics.shapes import HandleItem, OBBHandle, KeypointHandle
                 if isinstance(item, (HandleItem, OBBHandle, KeypointHandle)) and item.isVisible():
@@ -477,7 +521,7 @@ class Canvas(QGraphicsScene):
                     return
 
         # ---------------- 常规绘图起点 ----------------
-        if not self.is_inside_image(pt) and not self.drawing: return
+        if not self.is_inside_image(pt) and not self.drawing and edge_vertex is None: return
         if event.button() == Qt.LeftButton:
             if self.mode in [CanvasMode.RECT, CanvasMode.RBOX]:
                 self.drawing = True
@@ -505,17 +549,21 @@ class Canvas(QGraphicsScene):
                     shape = PointShape(clamped_pt)
                     self.shape_drawn.emit(shape)
             elif self.mode == CanvasMode.POLY:
+                vertex = edge_vertex if edge_vertex is not None else clamped_pt
                 if len(self.poly_pts) > 2:
-                    dist = ((clamped_pt.x() - self.poly_pts[0].x()) ** 2 + (
-                            clamped_pt.y() - self.poly_pts[0].y()) ** 2) ** 0.5
+                    dist = ((vertex.x() - self.poly_pts[0].x()) ** 2 + (
+                            vertex.y() - self.poly_pts[0].y()) ** 2) ** 0.5
                     if dist < 10:
                         self.finish_poly_shape()
+                        event.accept()
                         return
-                self.poly_pts.append(clamped_pt)
+                self.poly_pts.append(vertex)
                 self.update_temp_poly()
+                event.accept()
             elif self.mode == CanvasMode.LINE:
-                self.poly_pts.append(clamped_pt)
+                self.poly_pts.append(edge_vertex if edge_vertex is not None else clamped_pt)
                 self.update_temp_poly()
+                event.accept()
             elif self.mode == CanvasMode.POINT:
                 pass # Already handled above
         elif event.button() == Qt.RightButton:
@@ -574,9 +622,10 @@ class Canvas(QGraphicsScene):
 
     def mouseDoubleClickEvent(self, event):
         pt = event.scenePos()
-        if not self.is_inside_image(pt): return
+        if not self.is_inside_image(pt) and self.projected_edge_vertex(pt) is None:
+            return
 
-        for item in self.items(pt):
+        for item in self.items(pt) if self.is_inside_image(pt) else ():
             from jotmark.graphics.shapes import BaseShape, HandleItem
             if getattr(item, 'is_temp', False):
                 continue
@@ -600,6 +649,7 @@ class Canvas(QGraphicsScene):
             min_points = 3 if self.mode == CanvasMode.POLY else 2
             if len(self.poly_pts) >= min_points:
                 self.finish_poly_shape()
+                event.accept()
         else:
             super().mouseDoubleClickEvent(event)
 
@@ -615,6 +665,7 @@ class Canvas(QGraphicsScene):
         else:
             if self.temp_item: self.removeItem(self.temp_item)
             self.temp_item = temp_class(QPolygonF(display_pts), is_temp=True)
+            self.temp_item.setPen(QPen(QColor(28, 126, 214), self.annotation_line_width, Qt.DashLine))
             self.addItem(self.temp_item)
 
     def finish_poly_shape(self):

@@ -394,6 +394,7 @@ class AnnotationTreeWidget(QWidget):
         # their child rows immediately instead of leaving a transient blank
         # tree until another canvas signal happens to arrive.
         self._last_shapes = []
+        self.preferred_class = None  # Retained when canvas selection clears the tree.
         self._updating = False
 
         # 兼容 main.py 的 listWidget 接口引用
@@ -694,6 +695,8 @@ class AnnotationTreeWidget(QWidget):
 
         idx = self._class_list.index(old_name)
         self._class_list[idx] = new_name
+        if self.preferred_class == old_name:
+            self.preferred_class = new_name
         if old_name in self._class_colors:
             self._class_colors[new_name] = self._class_colors.pop(old_name)
             self._save_colors()
@@ -746,6 +749,9 @@ class AnnotationTreeWidget(QWidget):
             if not selected:
                 return
             item = selected[0]
+            active_class = (item.parent() or item).data(0, Qt.UserRole)
+            if active_class in self._class_list:
+                self.preferred_class = active_class
             shape = item.data(0, Qt.UserRole)
             # If a child shape item is selected in tree, select it on the canvas!
             if shape and hasattr(shape, 'scene') and shape.scene():
@@ -993,6 +999,15 @@ class AnnotationTreeWidget(QWidget):
             return item.parent().data(0, Qt.UserRole)
         return item.data(0, Qt.UserRole)
 
+    def get_annotation_class(self):
+        """Explicit tree choice first, otherwise the most recently used class."""
+        selected = self.get_selected_class()
+        if selected in self._class_list:
+            return selected
+        if self.preferred_class in self._class_list:
+            return self.preferred_class
+        return None
+
     def add_class(self, cls_name, color=None):
         if cls_name in self._class_list:
             return
@@ -1013,6 +1028,8 @@ class AnnotationTreeWidget(QWidget):
         if cls_name not in self._class_list:
             return
         self._class_list.remove(cls_name)
+        if self.preferred_class == cls_name:
+            self.preferred_class = None
         self._class_colors.pop(cls_name, None)
         self._last_shapes = [
             shape for shape in self._last_shapes
@@ -1022,6 +1039,7 @@ class AnnotationTreeWidget(QWidget):
 
     def clear_classes(self):
         self._class_list.clear()
+        self.preferred_class = None
         self._class_colors.clear()
         self._color_index = 0
         self.treeWidget.clear()

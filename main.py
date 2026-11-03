@@ -68,6 +68,7 @@ from utils.message import DialogOver
 from jotmark.config.paths import get_weights_base_dir
 from ui.attribute_widgets import AttributeSchemaDialog
 from ui.category_conversion_dialog import CategoryConversionDialog
+from ui.settings_dialog import SettingsDialog
 
 if MANUAL_ONLY:
     from jotmark.models.manual_client import ManualAnnotationClient as SAMClient, SAM_MODEL_MAP
@@ -1105,6 +1106,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.current_dir = None
         self.attribute_store = ClassAttributeStore()
         settings = QSettings("luohuabuxiema", "JotMark")
+        try:
+            line_width = float(settings.value("annotation_line_width", 2))
+        except (ValueError, TypeError):
+            line_width = 2.0
+        if not 0.5 <= line_width <= 12:
+            line_width = 2.0
+        self.scene.set_annotation_line_width(line_width)
+        try:
+            edge_margin = int(settings.value("edge_click_margin", 40))
+        except (ValueError, TypeError):
+            edge_margin = 40
+        self.scene.edge_click_margin = max(0, min(160, edge_margin))
         self.annotation_output_dir = settings.value("annotation_output_dir", "") or ""
         extension_setting = settings.value("show_file_extensions", False)
         self.show_file_extensions = str(extension_setting).strip().lower() in {"1", "true", "yes", "on"}
@@ -1240,6 +1253,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
         # 安装事件过滤器以实现 focus 边框变化
         self.samPromptInput.installEventFilter(self)
+
+        if str(settings.value("dark_theme", False)).lower() in ("true", "1"):
+            self.toggle_theme()
 
         # 恢复上次关闭时的标注路径和图片
         self.restore_last_state()
@@ -1468,6 +1484,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.templateWidget.edit_template.connect(self.edit_pose_template)
         self.templateWidget.delete_template.connect(self.delete_pose_template)
         self.btnCollapse.clicked.connect(self.toggle_sidebar)
+        self.btnSettings.clicked.connect(self.show_settings_dialog)
         self.btnThemeToggle.clicked.connect(self.toggle_theme)
 
         self.btnUndo.clicked.connect(self.undo)
@@ -2774,6 +2791,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def toggle_theme(self):
         self.is_dark_theme = not self.is_dark_theme
+        QSettings("luohuabuxiema", "JotMark").setValue("dark_theme", self.is_dark_theme)
         if self.is_dark_theme:
             self.setStyleSheet(DARK_THEME)
             self.btnThemeToggle.setText("☀")
@@ -3271,8 +3289,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             cls_name = shape.template.get("label", shape.template.get("name", "Unknown"))
             ok = True
         else:
-            # 去除弹窗：直接获取当前选中的类别，没有则使用第一个或默认 "dog"
-            selected_cls = self.classListWidget.get_selected_class()
+            # An explicit tree choice wins; cleared selection keeps last used class.
+            selected_cls = self.classListWidget.get_annotation_class()
             if not selected_cls:
                 classes = self.classListWidget.get_class_list()
                 selected_cls = classes[0] if classes else "dog"
@@ -3288,6 +3306,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.save_classes()
 
             shape.label = cls_name
+            self.classListWidget.preferred_class = cls_name
             if hasattr(shape, 'update_label_text'):
                 shape.update_label_text(cls_name)
             if hasattr(shape, 'update_label_position'):
@@ -3776,6 +3795,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         output_dir = QFileDialog.getExistingDirectory(self, "选择标注保存目录", start_dir)
         if not output_dir:
             return
+        self.set_annotation_output_dir(output_dir)
+
+    def set_annotation_output_dir(self, output_dir):
+        if output_dir == self.annotation_output_dir:
+            return
         # Preserve any work currently shown in the old location before
         # switching reads and writes to the newly selected output directory.
         if self.current_image_path:
@@ -3790,7 +3814,42 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.apply_class_colors_to_scene()
             self.update_annotation_tree()
             self.push_state()
-        self.statusBar.showMessage(f"标注将保存至：{output_dir}", 5000)
+        self.statusBar.showMessage(f"标注将保存至：{output_dir or '图片同目录'}", 5000)
+
+    def show_settings_dialog(self):
+        dialog = SettingsDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        width = dialog.line_width.value()
+        if width != self.scene.annotation_line_width:
+            self.scene.set_annotation_line_width(width)
+            QSettings("luohuabuxiema", "JotMark").setValue("annotation_line_width", width)
+        margin = dialog.edge_click_margin.value()
+        if margin != self.scene.edge_click_margin:
+            self.scene.edge_click_margin = margin
+            QSettings("luohuabuxiema", "JotMark").setValue("edge_click_margin", margin)
+            if not self.view._user_zoomed:
+                self.view.reset_to_fit()
+        if dialog.extensions.isChecked() != self.show_file_extensions:
+            self.btnFileExtensions.setChecked(dialog.extensions.isChecked())
+        key = dialog.sort_key.currentData()
+        descending = dialog.descending.isChecked()
+        if key != self.file_sort_key or descending != self.file_sort_descending:
+            self.file_sort_key = key
+            self.file_sort_descending = descending
+            settings = QSettings("luohuabuxiema", "JotMark")
+            settings.setValue("file_sort_key", key)
+            settings.setValue("file_sort_descending", descending)
+            self._update_file_sort_button()
+            self._rebuild_file_list([
+                self._file_item_path(self.listFiles.item(index))
+                for index in range(self.listFiles.count())
+                if self.listFiles.item(index) is not None
+            ])
+        if dialog.dark_theme.isChecked() != self.is_dark_theme:
+            self.toggle_theme()
+        if dialog.output_dir.text() != self.annotation_output_dir:
+            self.set_annotation_output_dir(dialog.output_dir.text())
 
     def update_annotation_status(self):
         total = self.listFiles.count()
@@ -4236,6 +4295,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.scene.addItem(shape)
         if isinstance(shape, RotatedRectShape):
             shape.constrain_to_scene()
+        if hasattr(shape, 'set_color'):
+            shape.set_color(self.classListWidget.get_class_color(label))
 
     def _load_json(self, json_path):
         if not os.path.exists(json_path): return

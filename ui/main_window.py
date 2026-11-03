@@ -270,7 +270,9 @@ class CanvasView(QGraphicsView):
         super().__init__(parent)
         self.setRenderHint(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        # Viewport geometry changes when scrollbars appear; anchoring that
+        # resize under the OS cursor would undo the wheel event's exact anchor.
+        self.setResizeAnchor(QGraphicsView.NoAnchor)
         # Enlarged images need a precise way to reach edge details.  Qt only
         # shows these bars when the transformed scene exceeds the viewport.
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -285,18 +287,63 @@ class CanvasView(QGraphicsView):
         self._is_panning = False
         self._pan_start_pos = None
         self._user_zoomed = False
+        self._fit_scale = 1.0
 
     def _apply_zoom(self, factor):
-        """Zoom while preserving the user's pan/scrollbar navigation state."""
+        """Keep the scene point under the wheel at the same viewport pixel."""
+        self._zoom_at(factor, self.viewport().rect().center())
+
+    def _zoom_at(self, factor, viewport_pos):
+        scene = self.scene()
+        if not scene or not scene.img_item or factor <= 0:
+            return
+        position = viewport_pos.toPoint() if hasattr(viewport_pos, "toPoint") else viewport_pos
+        before = self.mapToScene(position)
+        # AnchorUnderMouse reads the OS cursor, which may not match the wheel
+        # event position (touchpads, remote desktops and synthetic events).
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
         self.scale(factor, factor)
+        image = scene.image_rect()
+        scale = self.transform().m11()
+        if scale > self._fit_scale * 1.000001:
+            # Only the view gets a margin: the scene/image/export coordinates
+            # remain unchanged.  It lets even a corner pixel stay under the
+            # cursor when the scrollbars would otherwise clamp at image edges.
+            pad_x = self.viewport().width() / scale
+            pad_y = self.viewport().height() / scale
+            self.setSceneRect(image.adjusted(-pad_x, -pad_y, pad_x, pad_y))
+        else:
+            # Once the image fits again, restore the normal no-scrollbar view
+            # so the optional edge-click band can be used again.
+            self.setSceneRect(image)
+        center = self.mapToScene(self.viewport().rect().center())
+        after = self.mapToScene(position)
+        self.centerOn(center + before - after)
         self._user_zoomed = True
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
     def reset_to_fit(self):
         """Fit a newly opened image and reset edge-navigation scroll ranges."""
         scene = self.scene()
         if scene and scene.sceneRect().width() > 0:
-            self.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
+            self.setSceneRect(scene.sceneRect())
+            self._fit_image_with_edge_band()
+            self._fit_scale = self.transform().m11()
         self._user_zoomed = False
+
+    def _fit_image_with_edge_band(self):
+        """Leave a clickable strip on every side without changing image pixels."""
+        scene = self.scene()
+        if not scene or not scene.img_item:
+            return
+        image = scene.image_rect()
+        margin = min(scene.edge_click_margin, max(0, self.viewport().width() // 3),
+                     max(0, self.viewport().height() // 3))
+        if margin:
+            pad_x = image.width() * margin / max(1, self.viewport().width() - 2 * margin)
+            pad_y = image.height() * margin / max(1, self.viewport().height() - 2 * margin)
+            image = image.adjusted(-pad_x, -pad_y, pad_x, pad_y)
+        self.fitInView(image, Qt.KeepAspectRatio)
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
@@ -304,9 +351,10 @@ class CanvasView(QGraphicsView):
             zoom_in_factor = 1.15
             zoom_out_factor = 1.0 / zoom_in_factor
             if event.angleDelta().y() > 0:
-                self._apply_zoom(zoom_in_factor)
-            else:
-                self._apply_zoom(zoom_out_factor)
+                self._zoom_at(zoom_in_factor, event.position())
+            elif event.angleDelta().y() < 0:
+                self._zoom_at(zoom_out_factor, event.position())
+            event.accept()
         else:
             # 普通滚轮：滚动画布（仅放大后才生效，未放大时滚动条范围为 0 自动无效）
             # 垂直滚动
@@ -319,6 +367,7 @@ class CanvasView(QGraphicsView):
                 self.horizontalScrollBar().setValue(
                     self.horizontalScrollBar().value() - event.angleDelta().x()
                 )
+            event.accept()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MiddleButton:
@@ -368,7 +417,8 @@ class CanvasView(QGraphicsView):
         super().resizeEvent(event)
         scene = self.scene()
         if not self._user_zoomed and scene and scene.sceneRect().width() > 0:
-            self.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
+            self._fit_image_with_edge_band()
+            self._fit_scale = self.transform().m11()
 
 
 class Ui_MainWindow(object):
@@ -419,6 +469,13 @@ class Ui_MainWindow(object):
         self.btnCollapse.setFixedSize(36, 36)
         self.btnCollapse.setObjectName("btnTopBar")
 
+        self.btnSettings = QPushButton("⚙")
+        self.btnSettings.setFont(font_icon)
+        self.btnSettings.setToolTip("设置：标注、文件列表与外观")
+        self.btnSettings.setAccessibleName("设置")
+        self.btnSettings.setFixedSize(36, 36)
+        self.btnSettings.setObjectName("btnTopBar")
+
         # Theme Toggle Button
         self.btnThemeToggle = QPushButton("☀")
         self.btnThemeToggle.setFont(font_icon)
@@ -452,6 +509,7 @@ class Ui_MainWindow(object):
         topBarLayout.setContentsMargins(10, 0, 10, 0)
         topBarLayout.setSpacing(8)
         topBarLayout.addWidget(self.btnCollapse)
+        topBarLayout.addWidget(self.btnSettings)
         topBarLayout.addStretch()
         topBarLayout.addWidget(self.btnThemeToggle)
         self.mainLayout.addWidget(self.topBar)

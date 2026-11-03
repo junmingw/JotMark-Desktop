@@ -6,7 +6,7 @@
 
 ## 1. 收到压缩包后先做什么
 
-1. 将 `JotMark-手工标注版-Windows.zip` 保存到“下载”文件夹。
+1. 将三个系统通用的 `JotMark-手工标注版-20261103-v3.zip` 保存到“下载”文件夹（后续版本的日期、版本号可能不同）。
 2. 右键压缩包，选择 **全部提取**。
 3. 建议把提取后的 `JotMark-Desktop` 文件夹移动到：
 
@@ -33,7 +33,7 @@ Start-JotMark-Manual-Windows.bat
 Install-JotMark-Manual-Windows.bat
 ```
 
-脚本会先检查 Python；如果未安装，会自动使用 Windows Package Manager（`winget`）安装 Python 3.12。安装依赖前，脚本会对清华 TUNA、中科大、阿里云和官方 PyPI 的 HTTPS 响应时间进行短时测速，并选用当前响应最快的可用源；测速均失败或所选镜像下载失败时，会回退到官方 PyPI。该选择只用于本次安装，不会修改电脑的全局 pip 设置。整个过程不需要安装 CUDA、显卡驱动或模型。
+脚本会先检查 Python；如果未安装，会先尝试使用 Windows Package Manager（`winget`）安装 Python 3.12。若 `winget` 不存在、损坏或无法执行，安装器会测速清华 TUNA、中科大、阿里云和 Python 官方源，选用响应最快且能提供完整文件的 64 位 Python 3.12.10 安装包；下载失败时会回退到 Python 官方源，再静默安装到当前用户目录并继续创建 JotMark 专用环境。安装依赖前，脚本也会对清华 TUNA、中科大、阿里云和官方 PyPI 的 HTTPS 响应时间进行短时测速，并选用当前响应最快的可用源；测速均失败或所选镜像下载失败时，会回退到官方 PyPI。该选择只用于本次安装，不会修改电脑的全局 pip 设置。整个过程不需要安装 CUDA、显卡驱动或模型。
 
 极少数电脑会在 Python 刚安装完成后，当前黑色窗口仍找不到新的 Python 启动器。这不代表 Python 安装失败：关闭该窗口，再双击一次 `Install-JotMark-Manual-Windows.bat` 即可继续。
 
@@ -43,9 +43,9 @@ Install-JotMark-Manual-Windows.bat
 Set-Location C:\JotMark-Desktop; cmd /c .\Install-JotMark-Manual-Windows.bat
 ```
 
-首次运行时保持黑色窗口开启，直到看到 `Installation complete.`。之后只需双击 `Start-JotMark-Manual-Windows.bat` 启动。
+首次运行时保持黑色窗口开启，直到看到 `Installation complete.`。之后只需双击 `Start-JotMark-Manual-Windows.bat` 启动；该启动脚本会检查 Python 虚拟环境和必要依赖，若未安装或已损坏，会自动调用安装器进行配置。
 
-## 3. `winget` 不可用时：手动安装 Python
+## 3. 自动回退仍失败时：手动安装 Python
 
 JotMark 手工版首次安装需要联网下载 Python 图形与图像处理组件。
 
@@ -68,7 +68,7 @@ py -3 --version
 
 ### 方法 B：图形安装程序
 
-如果 `winget` 不可用，请在浏览器搜索“Python Windows 下载”，从 Python 官方网站下载 **Windows installer (64-bit)**。安装时务必勾选：
+新版安装器会在 `winget` 不可用时自动使用 Python 官方安装包。只有该自动回退也因网络、代理或安全软件失败时，才需要手动安装。请在浏览器搜索“Python Windows 下载”，从 Python 官方网站下载 **Windows installer (64-bit)**。安装时务必勾选：
 
 ```text
 Add python.exe to PATH
@@ -97,6 +97,10 @@ py -3 --version
 
 ## 5. 每次启动
 
+左上角侧边栏折叠按钮右侧的 **⚙ 设置** 可调整标注线宽（0.5–12 px，每档 0.5 px）、文件列表排序/后缀、主题及保存目录。线宽仅改变画布显示，不修改标注坐标；连续绘制沿用上次类别，右侧主动选择的类别优先。
+
+画布中 **Ctrl + 滚轮** 会保持鼠标指向的图片位置不动进行缩放；放大后可用滚动条查看边缘。⚙ 设置中的 **图片边缘留白/投点距离** 默认为 40 px，可在 0–160 px 调整：图片适应窗口时四周预留空白；放大后滚动到边缘留白时，也能在可见画布内设定距离内点击多边形或折线，点会落在对应图片边缘。超过距离、点击位置不在画布中均不会新增点；设为 0 可关闭。
+
 双击项目根目录的：
 
 ```text
@@ -104,6 +108,8 @@ Start-JotMark-Manual-Windows.bat
 ```
 
 打开的黑色窗口必须保持开启；关闭 JotMark 后，它会自动结束。程序以最大化窗口启动。
+
+如果误跳过了安装步骤，也可以直接双击 `Start-JotMark-Manual-Windows.bat`：它会检测手工标注环境，并自动执行安装或修复流程。
 
 启动后看不到“智能”“SAM”“模型”“训练”等按钮是正常的：这说明当前处于无模型、纯手工标注版。
 
@@ -195,8 +201,8 @@ examples\classes.example.txt
 
 | 现象 | 处理方式 |
 | --- | --- |
-| 双击安装脚本后提示找不到 Python 或 `winget` | 从 Microsoft Store 安装/更新 **App Installer** 后重试；也可按第 3 节手动安装 Python。 |
-| 双击启动脚本提示未安装 | 先双击 `Install-JotMark-Manual-Windows.bat`，等待出现 `Installation complete.`。 |
+| 双击安装脚本后提示找不到 Python 或 `winget` | 新版会自动改用 Python 官方安装包。若仍失败，检查网络、代理或安全软件，再按第 3 节手动安装 Python。 |
+| 双击启动脚本提示环境安装失败 | 启动脚本会自动调用安装器。确认网络正常并保持黑色窗口开启；安装器会依次尝试 `winget` 和 Python 官方安装包。 |
 | 安装下载失败 | 检查网络、公司代理或安全软件；网络恢复后重新运行安装脚本即可。 |
 | 报错中出现 `Windows Long Path support`、`No such file or directory`，且路径很长 | 使用新版安装包；它会把依赖安装到 `%LOCALAPPDATA%\JotMark\manual-venv`。若仍使用旧包，请将项目重新解压到 `E:\JotMark-Desktop` 等短路径后再安装。 |
 | 想固定使用某个镜像 | 在 PowerShell 中先执行 `$env:JOTMARK_PIP_INDEX_URL='https://镜像地址/simple/'`，再运行安装命令；该设置只对当前 PowerShell 窗口有效。 |

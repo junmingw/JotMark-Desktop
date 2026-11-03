@@ -7,9 +7,9 @@ ENV_DIR="${ENV_DIR:-$ROOT/.venv-jotmark-manual}"
 
 environment_is_healthy() {
     [[ -x "$ENV_DIR/bin/python" ]] \
-        && JOTMARK_MANUAL_ONLY=1 "$ENV_DIR/bin/python" -c \
-            "import cv2, numpy; from PIL import Image; from PySide6.QtWidgets import QApplication; import main; assert main.MANUAL_ONLY" \
-            >/dev/null 2>&1
+        && (cd "$ROOT" && JOTMARK_MANUAL_ONLY=1 "$ENV_DIR/bin/python" -c \
+            "import sys, cv2, numpy; from PIL import Image; from PySide6.QtWidgets import QApplication; import main; assert sys.version_info >= (3, 10); assert main.MANUAL_ONLY" \
+            >/dev/null 2>&1)
 }
 
 if ! environment_is_healthy; then

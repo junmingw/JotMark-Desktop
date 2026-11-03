@@ -73,8 +73,22 @@ def get_current_image_height(shape_item=None):
 
 
 class BaseShape:
+    def annotation_pen_width(self):
+        scene = self.scene()
+        return getattr(scene, "annotation_line_width", 2) if scene else 2
+
+    def set_annotation_line_width(self, width):
+        """Presentation only: do not modify exported geometry or instance data."""
+        if hasattr(self, 'normal_pen'):
+            self.normal_pen.setWidthF(float(width))
+            self.setPen(self.normal_pen)
+        elif hasattr(self, 'setPen'):
+            pen = self.pen()
+            pen.setWidthF(float(width))
+            self.setPen(pen)
+
     def setup_style(self, item):
-        self.normal_pen = QPen(QColor(28, 126, 214), 2)
+        self.normal_pen = QPen(QColor(28, 126, 214), self.annotation_pen_width())
         self.normal_brush = QBrush(QColor(28, 126, 214, 50))
         self.hover_brush = QBrush(QColor(28, 126, 214, 120))
 
@@ -123,7 +137,7 @@ class BaseShape:
 
     def set_color(self, color):
         """dynamically update shape color based on class color"""
-        self.normal_pen = QPen(color, 2)
+        self.normal_pen = QPen(color, self.annotation_pen_width())
         self.normal_brush = QBrush(QColor(color.red(), color.green(), color.blue(), 50))
         self.hover_brush = QBrush(QColor(color.red(), color.green(), color.blue(), 120))
         self.setPen(self.normal_pen)
@@ -701,6 +715,13 @@ class PoseShape(QGraphicsObject, BaseShape):
         if hasattr(self, 'label_text') and self.label_text:
             self.label_text.setDefaultTextColor(color)
 
+    def set_annotation_line_width(self, width):
+        self.update_lines()
+        if self.rect_item.pen().style() != Qt.NoPen:
+            pen = self.rect_item.pen()
+            pen.setWidthF(float(width))
+            self.rect_item.setPen(pen)
+
     def update_geometry(self):
         w, h = self.box_w, self.box_h
         self.rect_item.setRect(-w / 2, -h / 2, w, h)
@@ -775,7 +796,7 @@ class PoseShape(QGraphicsObject, BaseShape):
                 line_item.hide()
             else:
                 line_item.show()
-                width = 4 if (getattr(self, '_hovered', False) or self.isSelected()) else 2
+                width = self.annotation_pen_width() * (2 if (getattr(self, '_hovered', False) or self.isSelected()) else 1)
                 line_item.setPen(QPen(kp1.color, width))
                 if kp1.visible_state == 1 or kp2.visible_state == 1:
                     line_item.setOpacity(0.5)
@@ -922,7 +943,7 @@ class PoseShape(QGraphicsObject, BaseShape):
                 # 未选中时，靠近骨架线/关键点显示手指光标，提示可点击进入编辑
                 self.setCursor(Qt.PointingHandCursor)
                 # 悬停显示浅绿色虚线提示框
-                self.rect_item.setPen(QPen(QColor(50, 255, 50, 150), 2, Qt.DashLine))
+                self.rect_item.setPen(QPen(QColor(50, 255, 50, 150), self.annotation_pen_width(), Qt.DashLine))
                 self.rect_item.show()
             else:
                 self.setZValue(0.0)
@@ -932,10 +953,10 @@ class PoseShape(QGraphicsObject, BaseShape):
         else:
             if state:
                 self.setCursor(Qt.OpenHandCursor)
-                self.rect_item.setPen(QPen(QColor(50, 255, 50, 255), 2))
+                self.rect_item.setPen(QPen(QColor(50, 255, 50, 255), self.annotation_pen_width()))
             else:
                 self.unsetCursor()
-                self.rect_item.setPen(QPen(QColor(50, 255, 50, 200), 2))
+                self.rect_item.setPen(QPen(QColor(50, 255, 50, 200), self.annotation_pen_width()))
                 self.rect_item.show()
 
         # Update visual size of keypoints
@@ -1409,7 +1430,7 @@ class PointShape(QGraphicsEllipseItem, BaseShape):
     def __init__(self, point, label=""):
         r = 4
         super().__init__(point.x() - r, point.y() - r, r * 2, r * 2)
-        self.normal_pen = QPen(QColor(250, 82, 82), 2)
+        self.normal_pen = QPen(QColor(250, 82, 82), self.annotation_pen_width())
         self.normal_brush = QBrush(QColor(250, 82, 82, 150))
         self.hover_brush = QBrush(QColor(250, 82, 82, 220))
         self.setPen(self.normal_pen)
@@ -1427,7 +1448,7 @@ class PointShape(QGraphicsEllipseItem, BaseShape):
 
     def set_color(self, color):
         """dynamically update point color based on class color"""
-        self.normal_pen = QPen(color, 2)
+        self.normal_pen = QPen(color, self.annotation_pen_width())
         self.normal_brush = QBrush(QColor(color.red(), color.green(), color.blue(), 150))
         self.hover_brush = QBrush(QColor(color.red(), color.green(), color.blue(), 220))
         self.setPen(self.normal_pen)
@@ -1621,11 +1642,17 @@ class RotatedRectShape(QGraphicsObject, BaseShape):
         """dynamically update OBB color based on class color"""
         self._base_color = color
         if not self.is_temp:
-            self.rect_item.setPen(QPen(color, 2))
+            self.rect_item.setPen(QPen(color, self.annotation_pen_width()))
             self.rect_item.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 50)))
             self.rotate_line.setPen(QPen(color, 1.5, Qt.DashLine))
         if hasattr(self, 'label_text') and self.label_text:
             self.label_text.setDefaultTextColor(color)
+
+    def set_annotation_line_width(self, width):
+        if not self.is_temp:
+            pen = self.rect_item.pen()
+            pen.setWidthF(float(width))
+            self.rect_item.setPen(pen)
 
     def boundingRect(self):
         r = self.box_h / 2 + 35
