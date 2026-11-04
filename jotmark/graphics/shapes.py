@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsEllipseItem, \
     QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsObject, QMenu
-from PySide6.QtGui import QPen, QBrush, QColor, QPolygonF, QFont, QTransform, QPainter, QAction, QPainterPath, QPainterPathStroker
+from PySide6.QtGui import QPen, QBrush, QColor, QPolygonF, QFont, QFontMetrics, QTransform, QPainter, QAction, QPainterPath, QPainterPathStroker
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer
+from html import escape
 import math
 from jotmark.graphics.geometry import fit_obb_to_bounds
 
@@ -70,6 +71,77 @@ def get_current_image_height(shape_item=None):
                     return pixmap.height()
                 
     return 720 # Fallback
+
+
+class AnnotationLabelItem(QGraphicsTextItem):
+    """Readable, screen-sized label for a shape of any geometric size."""
+
+    MAX_WIDTH = 215
+    MAX_VISIBLE_ATTRIBUTES = 4
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFont(QFont("Arial", 10))
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+        self.setZValue(1001)
+
+    def paint(self, painter, option, widget=None):
+        painter.setPen(QPen(QColor(148, 163, 184, 170), 0.8))
+        painter.setBrush(QColor(15, 23, 42, 230))
+        painter.drawRoundedRect(self.boundingRect(), 4, 4)
+        super().paint(painter, option, widget)
+
+    def _wrapped(self, text, max_lines=2, bold=False):
+        """Wrap by rendered pixel width, including long CJK/English values."""
+        font = QFont(self.font())
+        font.setBold(bold)
+        metrics = QFontMetrics(font)
+        lines, current = [], ""
+        for char in text:
+            if char == "\n":
+                lines.append(current)
+                current = ""
+            elif metrics.horizontalAdvance(current + char) > self.MAX_WIDTH and current:
+                # Prefer a separator over splitting a value in its last
+                # letter (e.g. partly_truncated or a long category name).
+                break_at = max(current.rfind(sep) for sep in ("、", " ", "：", "/"))
+                if break_at >= 4:
+                    lines.append(current[:break_at + 1].rstrip())
+                    current = "  " + current[break_at + 1:].lstrip() + char
+                else:
+                    lines.append(current)
+                    current = char
+            else:
+                current += char
+            if len(lines) >= max_lines:
+                lines[-1] = lines[-1].rstrip("…") + "…"
+                return lines
+        if current:
+            lines.append(current)
+        return lines or [""]
+
+    def set_content(self, category, attributes=(), show_attributes=True):
+        category = str(category or "")
+        preview = list(attributes) if show_attributes else []
+        visible = preview[:self.MAX_VISIBLE_ATTRIBUTES]
+        lines = [("#FFFFFF", line, True) for line in self._wrapped(category, 3, bold=True)]
+        for scope, name, value in visible:
+            marker = "◇" if scope == "global" else "◆"
+            color = "#BAE6FD" if scope == "global" else "#FDE68A"
+            lines.extend((color, line, False) for line in self._wrapped(f"{marker} {name}：{value}"))
+        remaining = len(preview) - len(visible)
+        if remaining:
+            lines.append(("#CBD5E1", f"…另有 {remaining} 项（悬停查看）", False))
+        html_lines = [
+            f'<span style="color:{color}; font-weight:{"bold" if is_category else "normal"}">{escape(line)}</span>'
+            for color, line, is_category in lines
+        ]
+        self.setHtml("<br/>".join(html_lines))
+        tooltip = [f"类别：{category}"]
+        if show_attributes:
+            tooltip.extend(f"{'公共' if scope == 'global' else '类别'}属性 · {name}：{value}"
+                           for scope, name, value in attributes)
+        self.setToolTip("\n".join(tooltip))
 
 
 class BaseShape:
@@ -154,66 +226,75 @@ class BaseShape:
                     h.setPen(QPen(color, 1.5))
 
     def setup_label(self, item):
-        self.label_text = QGraphicsTextItem(item)
-        self.label_text.setDefaultTextColor(QColor(255, 255, 255))
-        self.label_text.setFont(QFont("Arial", 10, QFont.Bold))
-        self.label_text.setZValue(1001)
+        self.label_text = AnnotationLabelItem(item)
+
+    @staticmethod
+    def _display_value(value):
+        if isinstance(value, bool):
+            return "是" if value else "否"
+        if isinstance(value, (list, tuple)):
+            return "、".join(str(item) for item in value if str(item).strip())
+        return str(value).strip() if value is not None else ""
+
+    def _label_attributes(self, global_schema, class_schema):
+        values = getattr(self, "attributes", {})
+        if not isinstance(values, dict):
+            return []
+        lines = []
+
+        def collect(nodes, scope):
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                value = self._display_value(values.get(node.get("id")))
+                if not value:
+                    continue
+                lines.append((scope, str(node.get("name") or "属性"), value))
+                collect(node.get("children", []), scope)
+
+        collect(global_schema, "global")
+        collect(class_schema, "class")
+        return lines
 
     def update_label_position(self, item):
         if not hasattr(self, 'label_text') or not self.label_text:
             return
 
-        bound_rect = item.boundingRect()
-        label_w = self.label_text.boundingRect().width()
-        label_h = self.label_text.boundingRect().height()
-        
-        # Default position: above the bounding box
-        x = bound_rect.center().x() - label_w / 2
-        y = bound_rect.top() - 22
-        
-        # Get scene coordinates for this position
-        scene_pos = item.mapToScene(QPointF(x, y))
-        
-        # Get image bounds from scene or active main window
-        img_w, img_h = 1280, 720
         scene = item.scene()
-        if scene and hasattr(scene, 'img_item') and scene.img_item:
-            if hasattr(scene, 'image_size'):
-                image_size = scene.image_size()
-                img_w, img_h = image_size.width(), image_size.height()
-            else:
-                pix = scene.img_item.pixmap()
-                if pix and not pix.isNull():
-                    img_w = pix.width()
-                    img_h = pix.height()
-        else:
-            from PySide6.QtWidgets import QApplication
-            for widget in QApplication.topLevelWidgets():
-                if hasattr(widget, 'scene') and widget.scene:
-                    sc = widget.scene
-                    if hasattr(sc, 'img_item') and sc.img_item:
-                        if hasattr(sc, 'image_size'):
-                            image_size = sc.image_size()
-                            img_w, img_h = image_size.width(), image_size.height()
-                            break
-                        pix = sc.img_item.pixmap()
-                        if pix and not pix.isNull():
-                            img_w = pix.width()
-                            img_h = pix.height()
-                            break
+        view = scene.views()[0] if scene and scene.views() else None
+        if not view:
+            self.label_text.setPos(item.boundingRect().topLeft())
+            return
+        scale = max(abs(view.transform().m11()), 0.01)
+        bounds = item.mapRectToScene(item.boundingRect())
+        visible = view.mapToScene(view.viewport().rect()).boundingRect()
+        if not bounds.intersects(visible):
+            # Never pin an off-screen annotation's label to the viewport:
+            # that produces unrelated "ghost" labels when panning an image.
+            self.label_text.setPos(item.mapFromScene(bounds.topLeft()))
+            return
+        width = self.label_text.boundingRect().width() / scale
+        height = self.label_text.boundingRect().height() / scale
+        x = max(visible.left(), min(bounds.left(), visible.right() - width))
+        y = bounds.top() - height - 3 / scale
+        if y < visible.top():
+            y = bounds.bottom() + 3 / scale
+        y = max(visible.top(), min(y, visible.bottom() - height))
+        self.label_text.setPos(item.mapFromScene(QPointF(x, y)))
 
-        # Check if the label goes above the image top, or beyond left/right edges
-        margin = 5.0
-        if scene_pos.y() < margin or scene_pos.x() < margin or (scene_pos.x() + label_w) > (img_w - margin):
-            # Center the label inside the bounding box
-            x = bound_rect.center().x() - label_w / 2
-            y = bound_rect.center().y() - label_h / 2
-            
-        self.label_text.setPos(x, y)
-
-    def update_label_text(self, text):
+    def update_label_text(self, text, global_schema=None, class_schema=None):
         if hasattr(self, 'label_text') and self.label_text:
-            self.label_text.setPlainText(text)
+            if global_schema is not None or class_schema is not None:
+                self._annotation_label_schemas = (global_schema or [], class_schema or [])
+            schemas = getattr(self, "_annotation_label_schemas", ([], []))
+            scene = self.scene()
+            show = getattr(scene, "show_canvas_attributes", True)
+            attributes = self._label_attributes(*schemas) if show else []
+            content = (str(text or ""), tuple(attributes), show)
+            if getattr(self, "_annotation_label_content", None) != content:
+                self.label_text.set_content(text, attributes, show)
+                self._annotation_label_content = content
+                self.update_label_position(self)
             self.label_text.show()
 
     def update_label_visibility(self, item, is_selected=False, is_hovered=False):

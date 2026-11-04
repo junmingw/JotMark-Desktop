@@ -123,6 +123,7 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         dialog = SettingsDialog(win)
         dialog.line_width.setValue(0.5)
         self.assertEqual(dialog.line_width.singleStep(), 0.5)
+        dialog.canvas_attributes.setChecked(False)
         dialog.edge_click_margin.setValue(70)
         dialog.extensions.setChecked(True)
         dialog.sort_key.setCurrentIndex(dialog.sort_key.findData("size"))
@@ -138,6 +139,8 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         self.assertEqual(win.file_sort_key, "size")
         self.assertTrue(win.file_sort_descending)
         self.assertTrue(win.is_dark_theme)
+        self.assertFalse(win.scene.show_canvas_attributes)
+        self.assertFalse(stored.value("show_canvas_attributes", type=bool))
         self.assertEqual(win.scene.annotation_line_width, 0.5)
         from main import MainWindow
         another = MainWindow()
@@ -145,6 +148,7 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
             self.assertEqual(another.scene.annotation_line_width, 0.5)
             self.assertEqual(another.scene.edge_click_margin, 70)
             self.assertTrue(another.is_dark_theme)
+            self.assertFalse(another.scene.show_canvas_attributes)
         finally:
             another.close()
 

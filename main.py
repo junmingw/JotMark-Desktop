@@ -1113,6 +1113,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not 0.5 <= line_width <= 12:
             line_width = 2.0
         self.scene.set_annotation_line_width(line_width)
+        show_attributes_setting = settings.value("show_canvas_attributes", True)
+        self.scene.show_canvas_attributes = str(show_attributes_setting).strip().lower() not in {"0", "false", "no", "off"}
         try:
             edge_margin = int(settings.value("edge_click_margin", 40))
         except (ValueError, TypeError):
@@ -3241,6 +3243,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             DialogOver(self, f"属性配置写入失败：\n{exc}", "导入失败", "warning")
             return
 
+        self.update_annotation_tree()
         self.update_attribute_editor()
         backup_message = f"\n旧配置备份：{backup_dir}" if backup_dir else ""
         DialogOver(
@@ -3395,6 +3398,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.attribute_store.set_attributes(class_name, dialog.get_attributes())
             self.attribute_store.save()
             self._prune_removed_attribute_values(class_name)
+            self.update_annotation_tree()
             self.update_attribute_editor()
 
     def manage_global_attributes(self):
@@ -3404,6 +3408,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.attribute_store.set_global_attributes(dialog.get_attributes())
             self.attribute_store.save()
             self._prune_removed_attribute_values()
+            self.update_annotation_tree()
             self.update_attribute_editor()
 
     def _selected_annotation_shapes(self):
@@ -3431,6 +3436,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def on_shape_attributes_changed(self, shape):
         """Include property edits in autosave and undo/redo snapshots."""
         if shape and shape.scene() is self.scene:
+            self._refresh_shape_display_label(shape)
             self.scene.state_changed.emit()
 
     def rename_attribute_label(self, shape, attribute_id, scope):
@@ -3469,6 +3475,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         else:
             self.attribute_store.set_attributes(class_name, schema)
         self.attribute_store.save()
+        self.update_annotation_tree()
         self.update_attribute_editor()
 
     def _prune_removed_attribute_values(self, class_name=None):
@@ -3533,12 +3540,28 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self._annotation_tree_timer.isActive():
             self._annotation_tree_timer.start()
 
+    def _refresh_shape_display_label(self, shape, global_schema=None, class_schema=None):
+        if getattr(shape, "is_temp", False) or not hasattr(shape, "label_text"):
+            return
+        label = getattr(shape, "label", "")
+        shape.update_label_text(
+            label,
+            self.attribute_store.global_attributes() if global_schema is None else global_schema,
+            self.attribute_store.attributes_for(label) if class_schema is None else class_schema,
+        )
+
     def update_annotation_tree(self):
         self._annotation_tree_timer.stop()
         shapes = []
+        global_schema = self.attribute_store.global_attributes()
+        class_schemas = {}
         for item in self.scene.items():
             from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape
             if isinstance(item, (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)) and not getattr(item, 'is_temp', False):
+                label = getattr(item, "label", "")
+                if label not in class_schemas:
+                    class_schemas[label] = self.attribute_store.attributes_for(label)
+                self._refresh_shape_display_label(item, global_schema, class_schemas[label])
                 shapes.append(item)
         self.classListWidget.update_annotations(shapes)
 
@@ -3824,6 +3847,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if width != self.scene.annotation_line_width:
             self.scene.set_annotation_line_width(width)
             QSettings("luohuabuxiema", "JotMark").setValue("annotation_line_width", width)
+        show_attributes = dialog.canvas_attributes.isChecked()
+        if show_attributes != self.scene.show_canvas_attributes:
+            self.scene.show_canvas_attributes = show_attributes
+            QSettings("luohuabuxiema", "JotMark").setValue("show_canvas_attributes", show_attributes)
+            self.update_annotation_tree()
         margin = dialog.edge_click_margin.value()
         if margin != self.scene.edge_click_margin:
             self.scene.edge_click_margin = margin

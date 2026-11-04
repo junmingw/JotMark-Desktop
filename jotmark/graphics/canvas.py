@@ -62,6 +62,7 @@ class Canvas(QGraphicsScene):
         super().__init__(parent)
         self.mode = CanvasMode.RECT
         self.annotation_line_width = 2
+        self.show_canvas_attributes = True
         self.edge_click_margin = 40  # screen pixels; 0 disables off-image vertex placement
         self.img_item = None
         self._image_size = QSize()
@@ -114,6 +115,12 @@ class Canvas(QGraphicsScene):
             pen = self.temp_item.rect_item.pen()
             pen.setWidthF(self.annotation_line_width)
             self.temp_item.rect_item.setPen(pen)
+
+    def reposition_annotation_labels(self):
+        """Keep fixed-screen-size labels next to their geometry after zoom."""
+        for item in self.items():
+            if isinstance(item, (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)) and not getattr(item, "is_temp", False):
+                item.update_label_position(item)
 
     def load_image(self, path):
         self.clear_shapes()

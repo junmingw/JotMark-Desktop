@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QToolBar, QListWidget, QGraphicsView,
                                QLabel, QLineEdit, QPushButton, QStatusBar, QMenu, QComboBox, QSizePolicy, QAbstractItemView, QSplitter, QCheckBox, QFrame)
 from ui.annotation_tree_widget import AnnotationTreeWidget
-from PySide6.QtCore import Qt, Signal, QRect, QSize
+from PySide6.QtCore import Qt, Signal, QRect, QSize, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QPainter, QColor, QFont, QIcon, QPixmap
 
 def create_text_icon(text, color="#94A3B8"):
@@ -288,6 +288,19 @@ class CanvasView(QGraphicsView):
         self._pan_start_pos = None
         self._user_zoomed = False
         self._fit_scale = 1.0
+        # Re-anchor clamped labels as the viewport pans.  Coalesce scroll
+        # events so a large annotation set is not traversed for every pixel.
+        self._label_reposition_timer = QTimer(self)
+        self._label_reposition_timer.setSingleShot(True)
+        self._label_reposition_timer.setInterval(0)
+        self._label_reposition_timer.timeout.connect(self._reposition_labels)
+        self.horizontalScrollBar().valueChanged.connect(lambda _value: self._label_reposition_timer.start())
+        self.verticalScrollBar().valueChanged.connect(lambda _value: self._label_reposition_timer.start())
+
+    def _reposition_labels(self):
+        scene = self.scene()
+        if scene and hasattr(scene, "reposition_annotation_labels"):
+            scene.reposition_annotation_labels()
 
     def _apply_zoom(self, factor):
         """Keep the scene point under the wheel at the same viewport pixel."""
@@ -321,6 +334,7 @@ class CanvasView(QGraphicsView):
         self.centerOn(center + before - after)
         self._user_zoomed = True
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        scene.reposition_annotation_labels()
 
     def reset_to_fit(self):
         """Fit a newly opened image and reset edge-navigation scroll ranges."""
@@ -330,6 +344,8 @@ class CanvasView(QGraphicsView):
             self._fit_image_with_edge_band()
             self._fit_scale = self.transform().m11()
         self._user_zoomed = False
+        if scene:
+            scene.reposition_annotation_labels()
 
     def _fit_image_with_edge_band(self):
         """Leave a clickable strip on every side without changing image pixels."""
@@ -419,6 +435,7 @@ class CanvasView(QGraphicsView):
         if not self._user_zoomed and scene and scene.sceneRect().width() > 0:
             self._fit_image_with_edge_band()
             self._fit_scale = self.transform().m11()
+            scene.reposition_annotation_labels()
 
 
 class Ui_MainWindow(object):
