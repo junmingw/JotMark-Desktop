@@ -83,6 +83,7 @@ class AnnotationLabelItem(QGraphicsTextItem):
         super().__init__(parent)
         self.setFont(QFont("Arial", 10))
         self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+        self.setCursor(Qt.PointingHandCursor)
         self.setZValue(1001)
 
     def paint(self, painter, option, widget=None):
@@ -124,24 +125,49 @@ class AnnotationLabelItem(QGraphicsTextItem):
         category = str(category or "")
         preview = list(attributes) if show_attributes else []
         visible = preview[:self.MAX_VISIBLE_ATTRIBUTES]
-        lines = [("#FFFFFF", line, True) for line in self._wrapped(category, 3, bold=True)]
-        for scope, name, value in visible:
+        lines = [("#FFFFFF", line, True, ("category", ""))
+                 for line in self._wrapped(category, 3, bold=True)]
+        for scope, name, value, node_id in visible:
             marker = "◇" if scope == "global" else "◆"
             color = "#BAE6FD" if scope == "global" else "#FDE68A"
-            lines.extend((color, line, False) for line in self._wrapped(f"{marker} {name}：{value}"))
+            lines.extend((color, line, False, (scope, node_id))
+                         for line in self._wrapped(f"{marker} {name}：{value}"))
         remaining = len(preview) - len(visible)
         if remaining:
-            lines.append(("#CBD5E1", f"…另有 {remaining} 项（悬停查看）", False))
+            lines.append(("#CBD5E1", f"…另有 {remaining} 项（点击查看）", False, ("summary", "")))
         html_lines = [
             f'<span style="color:{color}; font-weight:{"bold" if is_category else "normal"}">{escape(line)}</span>'
-            for color, line, is_category in lines
+            for color, line, is_category, _target in lines
         ]
         self.setHtml("<br/>".join(html_lines))
+        # QTextDocument cursor offsets use UTF-16, not Python's code-point
+        # counts.  Keep one target for every wrapped line of an attribute.
+        self._line_targets = []
+        offset = 0
+        rendered_lines = self.toPlainText().split("\n")
+        for (_color, _line, _is_category, target), rendered in zip(lines, rendered_lines):
+            # HTML layout can collapse spaces, including wrapped-line
+            # indentation; offsets must use what Qt actually rendered.
+            length = len(rendered.encode("utf-16-le")) // 2
+            self._line_targets.append((offset, offset + length, target))
+            offset += length + 1
         tooltip = [f"类别：{category}"]
         if show_attributes:
             tooltip.extend(f"{'公共' if scope == 'global' else '类别'}属性 · {name}：{value}"
-                           for scope, name, value in attributes)
+                           for scope, name, value, _node_id in attributes)
+            if attributes:
+                tooltip.append("选择/编辑模式下点击属性可更换，点击类别可修改类别。")
         self.setToolTip("\n".join(tooltip))
+
+    def target_at(self, local_pos):
+        """Return the category, attribute ID or summary under a label click."""
+        offset = self.document().documentLayout().hitTest(local_pos, Qt.FuzzyHit)
+        if offset < 0:
+            return None
+        for start, end, target in self._line_targets:
+            if start <= offset <= end:
+                return target
+        return None
 
 
 class BaseShape:
@@ -249,7 +275,7 @@ class BaseShape:
                 value = self._display_value(values.get(node.get("id")))
                 if not value:
                     continue
-                lines.append((scope, str(node.get("name") or "属性"), value))
+                lines.append((scope, str(node.get("name") or "属性"), value, str(node.get("id") or "")))
                 collect(node.get("children", []), scope)
 
         collect(global_schema, "global")
@@ -409,6 +435,7 @@ class RectShape(QGraphicsRectItem, BaseShape):
         if label:
             self.update_label_text(label)
             self.update_label_position(self)
+        self._graphics_ready = True
 
     def _ensure_handles(self):
         if self.lt_handle is not None:
@@ -529,6 +556,8 @@ class RectShape(QGraphicsRectItem, BaseShape):
         self._updating_handles = False
 
     def itemChange(self, change, value):
+        if not getattr(self, '_graphics_ready', False):
+            return super().itemChange(change, value)
         if change == QGraphicsItem.ItemPositionChange and not getattr(self, 'is_temp', False):
             return super().itemChange(change, clamp_item_position(self, value))
 
@@ -790,6 +819,7 @@ class PoseShape(QGraphicsObject, BaseShape):
         if is_temp:
             for h in self.handles:
                 h.hide()
+        self._graphics_ready = True
 
     def set_color(self, color):
         """PoseShape uses QGraphicsObject, not QGraphicsRectItem, so override set_color"""
@@ -1077,6 +1107,8 @@ class PoseShape(QGraphicsObject, BaseShape):
             h.setVisible(visible)
 
     def itemChange(self, change, value):
+        if not getattr(self, '_graphics_ready', False) or not hasattr(self, 'is_temp'):
+            return super().itemChange(change, value)
         if change == QGraphicsItem.ItemPositionChange and not getattr(self, 'is_temp', False) and not getattr(self, '_is_resizing', False):
             return super().itemChange(change, clamp_item_position(self, value, overflow_ratio=0.5))
         if change == QGraphicsItem.ItemSelectedHasChanged:
@@ -1119,6 +1151,7 @@ class PolyShape(QGraphicsPolygonItem, BaseShape):
                 self.update_label_position(self)
 
         # Vertex handles are allocated lazily only during hover/editing.
+        self._graphics_ready = True
 
     def hoverEnterEvent(self, event):
         self.apply_hover_enter(self)
@@ -1284,6 +1317,10 @@ class PolyShape(QGraphicsPolygonItem, BaseShape):
         self.update_label_position(self)
 
     def itemChange(self, change, value):
+        # Qt can invoke this virtual method during construction or teardown,
+        # before Python-side fields exist.  Forward such events untouched.
+        if not getattr(self, '_graphics_ready', False) or not hasattr(self, 'is_temp'):
+            return super().itemChange(change, value)
         if change == QGraphicsItem.ItemPositionChange and not getattr(self, 'is_temp', False):
             return super().itemChange(change, clamp_item_position(self, value))
 
@@ -1335,6 +1372,7 @@ class PolylineShape(QGraphicsPathItem, BaseShape):
                 self.update_label_text(label)
 
         self.setPolygon(self._points)
+        self._graphics_ready = True
 
     def polygon(self):
         return QPolygonF(self._points)
@@ -1492,6 +1530,8 @@ class PolylineShape(QGraphicsPathItem, BaseShape):
         self.setPolygon(QPolygonF([handle.pos() for handle in self.handles]))
 
     def itemChange(self, change, value):
+        if not getattr(self, '_graphics_ready', False) or not hasattr(self, 'is_temp'):
+            return super().itemChange(change, value)
         if change == QGraphicsItem.ItemPositionChange and not getattr(self, 'is_temp', False):
             return super().itemChange(change, clamp_item_position(self, value))
         if not self.is_temp:
@@ -1526,6 +1566,7 @@ class PointShape(QGraphicsEllipseItem, BaseShape):
         if label:
             self.update_label_text(label)
             self.update_label_position(self)
+        self._graphics_ready = True
 
     def set_color(self, color):
         """dynamically update point color based on class color"""
@@ -1556,6 +1597,8 @@ class PointShape(QGraphicsEllipseItem, BaseShape):
             scene.canvas_item_hovered.emit(self, False)
 
     def itemChange(self, change, value):
+        if not getattr(self, '_graphics_ready', False):
+            return super().itemChange(change, value)
         if change == QGraphicsItem.ItemPositionChange:
             return super().itemChange(change, clamp_item_position(self, value))
 
@@ -1696,6 +1739,7 @@ class RotatedRectShape(QGraphicsObject, BaseShape):
 
         if is_temp:
             self.rotate_line.hide()
+        self._graphics_ready = True
 
     def _ensure_handles(self):
         if self.h_top is not None:
@@ -1880,6 +1924,8 @@ class RotatedRectShape(QGraphicsObject, BaseShape):
             self._release_handles()
 
     def itemChange(self, change, value):
+        if not getattr(self, '_graphics_ready', False) or not hasattr(self, 'is_temp'):
+            return super().itemChange(change, value)
         if change == QGraphicsItem.ItemPositionChange and not getattr(self, 'is_temp', False) and not getattr(self, '_is_resizing', False) and not self._constraining_to_scene:
             scene = self.scene()
             if scene:

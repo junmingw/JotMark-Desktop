@@ -149,9 +149,11 @@ class ClassTreeItemWidget(QWidget):
 
         if new_name and new_name != self.class_name:
             old_name = self.class_name
-            self.class_name = new_name
-            self.lblClassName.setText(new_name)
-            self.parent_tree.rename_class_in_data(old_name, new_name)
+            if self.parent_tree.rename_class_in_data(old_name, new_name):
+                self.class_name = new_name
+                self.lblClassName.setText(new_name)
+            else:
+                self.lblClassName.setText(old_name)
 
     def set_active(self, active):
         text_color = "#E2E8F0" if self.parent_tree.is_dark else "#1E293B"
@@ -689,9 +691,12 @@ class AnnotationTreeWidget(QWidget):
 
     def rename_class_in_data(self, old_name, new_name):
         if old_name not in self._class_list:
-            return
+            return False
         if new_name in self._class_list:
-            return
+            return False
+        guard = getattr(self, "rename_guard", None)
+        if guard and not guard(old_name, new_name):
+            return False
 
         idx = self._class_list.index(old_name)
         self._class_list[idx] = new_name
@@ -707,6 +712,7 @@ class AnnotationTreeWidget(QWidget):
             item = self._class_items.pop(old_name)
             self._class_items[new_name] = item
             item.setData(0, Qt.UserRole, new_name)
+        return True
 
     # ======================== 双向选中机制 ========================
 
@@ -1359,9 +1365,11 @@ class AnnotationTreeWidget(QWidget):
     def save_classes(self):
         if not self._current_dir:
             return
+        from jotmark.data.annotation_safety import backup_previous_annotation
+        from jotmark.data.exporter import Exporter
         class_file = os.path.join(self._current_dir, "classes.txt")
-        with open(class_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(self._class_list))
+        backup_previous_annotation(class_file)
+        Exporter._atomic_write_text(class_file, "\n".join(self._class_list))
         self._save_colors()
 
     def _save_colors(self):
@@ -1369,8 +1377,10 @@ class AnnotationTreeWidget(QWidget):
             return
         color_file = os.path.join(self._current_dir, "class_colors.json")
         try:
+            from jotmark.data.annotation_safety import backup_previous_annotation
+            from jotmark.data.exporter import Exporter
             data = {k: v.name() for k, v in self._class_colors.items()}
-            with open(color_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            backup_previous_annotation(color_file)
+            Exporter._atomic_write_text(color_file, json.dumps(data, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(f"保存类别颜色失败: {exc}")

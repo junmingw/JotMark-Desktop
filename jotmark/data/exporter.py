@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import math
 from copy import deepcopy
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -42,6 +43,7 @@ class Exporter:
     def extract_shapes(scene):
         shapes_data = []
         for item in scene.items():
+            previous_count = len(shapes_data)
             if isinstance(item, RectShape) and not getattr(item, 'is_temp', False):
                 rect = item.rect()
                 p1 = item.mapToScene(rect.topLeft())
@@ -89,10 +91,11 @@ class Exporter:
                 })
             elif isinstance(item, PointShape) and not getattr(item, 'is_temp', False):
                 rect = item.rect()
+                center = item.mapToScene(rect.center())
                 shapes_data.append({
                     "label": item.label,
                     "type": "point",
-                    "points": [[rect.center().x(), rect.center().y()]],
+                    "points": [[center.x(), center.y()]],
                     "attributes": Exporter._shape_attributes(item),
                 })
             elif isinstance(item, RotatedRectShape) and not getattr(item, 'is_temp', False):
@@ -110,29 +113,36 @@ class Exporter:
                     "angle": angle,
                     "attributes": Exporter._shape_attributes(item),
                 })
+            if len(shapes_data) > previous_count:
+                metadata = getattr(item, "_json_metadata", None)
+                if isinstance(metadata, dict) and metadata:
+                    shapes_data[-1]["_json_metadata"] = deepcopy(metadata)
         shapes_data.reverse()
         return shapes_data
 
     @staticmethod
-    def save_json(filepath, image_path, image_width, image_height, shapes):
-        data = {
-            "version": "5.2.1",
-            "flags": {},
+    def save_json(filepath, image_path, image_width, image_height, shapes, document_metadata=None):
+        data = deepcopy(document_metadata) if isinstance(document_metadata, dict) else {}
+        data.setdefault("version", "5.2.1")
+        data.setdefault("flags", {})
+        data.update({
             "shapes": [],
             "imagePath": os.path.basename(image_path),
             "imageHeight": int(image_height),
             "imageWidth": int(image_width)
-        }
+        })
         for s in shapes:
             shape_type = s["type"]
-            shape_dict = {
+            metadata = s.get("_json_metadata")
+            shape_dict = deepcopy(metadata) if isinstance(metadata, dict) else {}
+            shape_dict.setdefault("group_id", None)
+            shape_dict.setdefault("flags", {})
+            shape_dict.update({
                 "label": s["label"],
                 "points": s["points"],
-                "group_id": None,
                 "shape_type": shape_type,
-                "flags": {},
                 "attributes": s.get("attributes", {}),
-            }
+            })
             if shape_type == "obb":
                 shape_dict["angle"] = s.get("angle", 0)
                 shape_dict["rect"] = s.get("rect", [0, 0, 0, 0])
@@ -144,7 +154,7 @@ class Exporter:
 
             data["shapes"].append(shape_dict)
 
-        Exporter._atomic_write_text(filepath, json.dumps(data, ensure_ascii=False, indent=2))
+        Exporter._atomic_write_text(filepath, json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False))
 
     @staticmethod
     def _format_curvelanes_coordinate(value):
@@ -219,6 +229,8 @@ class Exporter:
                     values = [float(value) for value in parts]
                 except ValueError as exc:
                     raise ValueError(f"第 {line_number} 行包含非数值坐标") from exc
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError(f"第 {line_number} 行包含无效坐标")
                 polylines.append([
                     [values[index], values[index + 1]]
                     for index in range(0, len(values), 2)

@@ -70,6 +70,29 @@ class CanvasAttributeLabelTests(unittest.TestCase):
         self.win.scene.addItem(shape)
         return shape
 
+    def _label_target_point(self, shape, target):
+        from PySide6.QtCore import QPointF
+        self.app.processEvents()
+        label = shape.label_text
+        # Find an actual painted line for this target rather than depending on
+        # font metrics or an assumed zoom level on the test platform.
+        ys = [y for y in range(2, int(label.boundingRect().height()) - 1)
+              if label.target_at(QPointF(10, y)) == target]
+        self.assertTrue(ys, (target, label.toPlainText()))
+        point = label.deviceTransform(self.win.view.viewportTransform()).map(
+            QPointF(10, (ys[0] + ys[-1]) / 2)).toPoint()
+        self.assertTrue(self.win.view.viewport().rect().contains(point), point)
+        return point
+
+    def _click_label_target(self, shape, target):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from jotmark.graphics.canvas import CanvasMode
+        self.win.scene.set_mode(CanvasMode.EDIT)
+        point = self._label_target_point(shape, target)
+        QTest.mouseClick(self.win.view.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.app.processEvents()
+
     def test_class_first_scoped_markers_wrapping_and_complete_tooltip(self):
         from jotmark.data.exporter import Exporter
         from jotmark.graphics.shapes import AnnotationLabelItem
@@ -226,6 +249,169 @@ class CanvasAttributeLabelTests(unittest.TestCase):
         self.assertLess(shape.label_text.boundingRect().width(), 235)
         self.assertIn("…", shape.label_text.toPlainText())
         self.assertIn(long_name, shape.label_text.toolTip())
+
+    def test_click_attribute_opens_picker_and_syncs_with_right_editor(self):
+        from PySide6.QtWidgets import QDialog
+        shape = self._shape(x=300)
+        other = self._shape(x=400)
+        shape.attributes = {"visibility": ["visible"]}
+        other.attributes = {"visibility": ["visible"]}
+        self.win.update_annotation_tree()
+        with patch("ui.attribute_widgets.AttributeValuePickerDialog.exec", return_value=QDialog.Accepted), \
+             patch("ui.attribute_widgets.AttributeValuePickerDialog.value", return_value=["partly_truncated"]):
+            self._click_label_target(shape, ("global", "visibility"))
+        self.assertTrue(shape.isSelected())
+        self.assertIs(self.win.attributeEditor._shape, shape)
+        self.assertEqual(shape.attributes["visibility"], ["partly_truncated"])
+        self.assertEqual(other.attributes["visibility"], ["visible"])
+        self.assertIn("partly_truncated", shape.label_text.toPlainText())
+
+    def test_click_attribute_after_zoom_and_click_category_remains_reclassification(self):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtWidgets import QDialog
+        shape = self._shape(x=300)
+        shape.attributes = {"visibility": ["visible"]}
+        self.win.update_annotation_tree()
+        self.win.view._zoom_at(2.4, self.win.view.mapFromScene(QPointF(300, 5)))
+        self.app.processEvents()
+        with patch("ui.attribute_widgets.AttributeValuePickerDialog.exec", return_value=QDialog.Rejected) as picker:
+            self._click_label_target(shape, ("global", "visibility"))
+        picker.assert_called_once()
+        self.assertEqual(shape.attributes["visibility"], ["visible"])
+        with patch.object(self.win, "edit_shape_label") as edit_class:
+            self._click_label_target(shape, ("category", ""))
+        edit_class.assert_called_once_with(shape)
+
+    def test_canvas_boolean_text_number_and_parent_clear_use_existing_rules(self):
+        shape = self._shape(x=300)
+        shape.attributes = {"bool": False, "parent": "active", "child": "child value", "count": 0}
+        shape.setSelected(True)
+        self.win.update_attribute_editor()
+        with patch("ui.attribute_widgets.QInputDialog.getItem", return_value=("是", True)):
+            self.win.on_canvas_attribute_clicked(shape, "global", "bool")
+        self.assertIs(shape.attributes["bool"], True)
+        with patch("ui.attribute_widgets.QInputDialog.getText", return_value=("12.5", True)):
+            self.win.on_canvas_attribute_clicked(shape, "class", "count")
+        self.assertEqual(shape.attributes["count"], 12.5)
+        with patch("ui.attribute_widgets.QInputDialog.getText", return_value=("not-a-number", True)), \
+             patch("ui.attribute_widgets.QMessageBox.warning") as warning:
+            self.win.on_canvas_attribute_clicked(shape, "class", "count")
+        warning.assert_called_once()
+        self.assertEqual(shape.attributes["count"], 12.5)
+        with patch("ui.attribute_widgets.QInputDialog.getText", return_value=("", True)):
+            self.win.on_canvas_attribute_clicked(shape, "global", "parent")
+        self.assertNotIn("parent", shape.attributes)
+        self.assertNotIn("child", shape.attributes)
+
+    def test_click_summary_opens_attribute_scopes(self):
+        shape = self._shape(x=300)
+        shape.attributes = {"visibility": ["visible"], "review": "normal", "bool": False,
+                            "parent": "active", "child": "done", "kind": "curb"}
+        self.win.update_annotation_tree()
+        with patch.object(self.win.attributeEditor, "open_all_attribute_scopes") as open_scopes:
+            self._click_label_target(shape, ("summary", ""))
+        open_scopes.assert_called_once()
+
+    def test_wrapped_lines_with_unicode_and_spaces_hit_the_correct_attribute(self):
+        from PySide6.QtCore import QPointF
+        shape = self._shape(label="类别😀" * 20, x=300)
+        shape.attributes = {"visibility": ["可见   特征" * 18], "bool": False}
+        self.win.update_annotation_tree()
+        label = shape.label_text
+        found = [label.target_at(QPointF(10, y)) for y in range(3, int(label.boundingRect().height()) - 1)]
+        self.assertIn(("category", ""), found)
+        self.assertIn(("global", "visibility"), found)
+        self.assertIn(("global", "bool"), found)
+        self.assertGreater(sum(target == ("global", "visibility") for target in found), 20)
+        self.assertLess(found.index(("global", "visibility")), found.index(("global", "bool")))
+
+    def test_canvas_edit_is_saved_and_can_be_undone_and_redone(self):
+        import json
+        from PySide6.QtWidgets import QDialog
+        from jotmark.data.exporter import Exporter
+        shape = self._shape(x=300)
+        shape.attributes = {"visibility": ["visible"]}
+        self.win.current_image_path = self.path
+        self.win.current_format = "json"
+        self.win.update_annotation_tree()
+        self.win.push_state()
+        with patch("ui.attribute_widgets.AttributeValuePickerDialog.exec", return_value=QDialog.Accepted), \
+             patch("ui.attribute_widgets.AttributeValuePickerDialog.value", return_value=["partly_truncated"]):
+            self._click_label_target(shape, ("global", "visibility"))
+        self.assertEqual(Exporter.extract_shapes(self.win.scene)[0]["attributes"]["visibility"], ["partly_truncated"])
+        self.win.auto_save_annotation(immediate=True)
+        with open(os.path.join(self.tmp.name, "road.json"), encoding="utf-8") as stream:
+            self.assertEqual(json.load(stream)["shapes"][0]["attributes"]["visibility"], ["partly_truncated"])
+        self.win.undo()
+        self.assertEqual(Exporter.extract_shapes(self.win.scene)[0]["attributes"]["visibility"], ["visible"])
+        self.win.redo()
+        self.assertEqual(Exporter.extract_shapes(self.win.scene)[0]["attributes"]["visibility"], ["partly_truncated"])
+
+    def test_summary_scope_selection_and_boolean_clear(self):
+        shape = self._shape(x=300)
+        shape.attributes = {"bool": False}
+        shape.setSelected(True)
+        self.win.update_attribute_editor()
+        with patch("ui.attribute_widgets.QInputDialog.getItem", return_value=("类别属性（仅当前类别）", True)), \
+             patch.object(self.win.attributeEditor, "_open_scope_dialog") as open_scope:
+            self.win.on_canvas_attributes_summary_clicked(shape)
+        open_scope.assert_called_once_with("class", "类别属性（仅当前类别）")
+        with patch("ui.attribute_widgets.QInputDialog.getItem", return_value=("清除", True)):
+            self.win.on_canvas_attribute_clicked(shape, "global", "bool")
+        self.assertNotIn("bool", shape.attributes)
+
+    def test_single_picker_preselects_and_clears_current_value(self):
+        from ui.attribute_widgets import AttributeValuePickerDialog
+        picker = AttributeValuePickerDialog("类型", ["road_edge", "curb"], "curb")
+        self.assertEqual(picker.value(), "curb")
+        picker._clear()
+        self.assertEqual(picker.value(), "")
+        multi = AttributeValuePickerDialog("状态", ["a", "b"], ["a", "b"], multiple=True)
+        self.assertEqual(multi.value(), ["a", "b"])
+        multi._clear()
+        self.assertEqual(multi.value(), [])
+
+    def test_canvas_click_uses_real_single_value_picker(self):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+        from ui.attribute_widgets import AttributeValuePickerDialog
+        schema = self.win.attribute_store.attributes_for("boundary")
+        schema[0]["options"] = ["road_edge", "curb"]
+        self.win.attribute_store.set_attributes("boundary", schema)
+        shape = self._shape(x=300)
+        shape.attributes = {"kind": "road_edge"}
+        self.win.update_annotation_tree()
+        seen = []
+
+        def select_curb():
+            dialog = QApplication.activeModalWidget()
+            if isinstance(dialog, AttributeValuePickerDialog):
+                seen.append(dialog.value())
+                dialog.list_widget.setCurrentRow(1)
+                dialog.accept()
+            elif dialog:
+                dialog.reject()
+
+        QTimer.singleShot(50, select_curb)
+        self._click_label_target(shape, ("class", "kind"))
+        self.assertEqual(seen, ["road_edge"])
+        self.assertEqual(shape.attributes["kind"], "curb")
+
+    def test_label_click_does_not_open_picker_while_drawing_polygon(self):
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtTest import QTest
+        from jotmark.graphics.canvas import CanvasMode
+        shape = self._shape(x=300)
+        shape.attributes = {"visibility": ["visible"]}
+        self.win.update_annotation_tree()
+        self.win.scene.set_mode(CanvasMode.POLY)
+        self.win.scene.poly_pts.append(QPointF(200, 200))
+        point = self._label_target_point(shape, ("global", "visibility"))
+        with patch.object(self.win.attributeEditor, "edit_attribute_value") as edit_attribute:
+            QTest.mouseClick(self.win.view.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+            self.app.processEvents()
+        edit_attribute.assert_not_called()
+        self.assertEqual(len(self.win.scene.poly_pts), 2)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,8 @@ class Canvas(QGraphicsScene):
     shape_drawn = Signal(object)
     shape_double_clicked = Signal(object)
     shape_label_clicked = Signal(object)
+    shape_attribute_clicked = Signal(object, str, str)
+    shape_attributes_summary_clicked = Signal(object)
     state_changed = Signal()
     canvas_item_hovered = Signal(object, bool)
     merge_selection_cancel_requested = Signal()
@@ -425,27 +427,39 @@ class Canvas(QGraphicsScene):
         # 1. 优先检测是否点击在已有的图形或者手柄上，如果是，则直接进入编辑/选择状态
         clicked_item = None
         clicked_label = False
+        label_item = None
         is_drawing_poly = (self.mode in (CanvasMode.POLY, CanvasMode.LINE) and len(self.poly_pts) > 0)
-        
-        if not is_drawing_poly and self.is_inside_image(pt):
-            items = self.items(pt)
-            for item in items:
-                from jotmark.graphics.shapes import HandleItem, OBBHandle, KeypointHandle
-                if isinstance(item, (HandleItem, OBBHandle, KeypointHandle)) and item.isVisible():
-                    if not getattr(item.parentItem(), 'is_temp', False):
-                        clicked_item = item
-                        break
+
+        inside_image = self.is_inside_image(pt)
+        label_edit = self.mode == CanvasMode.EDIT and not self.merge_selection_mode
+        view = next((v for v in self.views() if v.viewport() is event.widget()), None)
+        if not view and self.views():
+            view = self.views()[0]
+        device_transform = view.viewportTransform() if view else QTransform()
+        if not is_drawing_poly and (inside_image or label_edit):
+            # Labels ignore view scaling, so hit testing must use the actual
+            # device transform.  They may also lie in the image-edge margin.
+            items = self.items(pt, Qt.IntersectsItemShape, Qt.DescendingOrder, device_transform)
+            if inside_image:
+                for item in items:
+                    from jotmark.graphics.shapes import HandleItem, OBBHandle, KeypointHandle
+                    if isinstance(item, (HandleItem, OBBHandle, KeypointHandle)) and item.isVisible():
+                        if not getattr(item.parentItem(), 'is_temp', False):
+                            clicked_item = item
+                            break
             if not clicked_item:
                 for item in items:
                     from jotmark.graphics.shapes import BaseShape
-                    if isinstance(item, BaseShape):
+                    if inside_image and isinstance(item, BaseShape):
                         if not getattr(item, 'is_temp', False):
                             clicked_item = item
                             break
                     elif item.parentItem() and isinstance(item.parentItem(), BaseShape):
-                        if not getattr(item.parentItem(), 'is_temp', False):
+                        is_label = item == getattr(item.parentItem(), 'label_text', None)
+                        if (inside_image or is_label) and not getattr(item.parentItem(), 'is_temp', False):
                             clicked_item = item.parentItem()
-                            clicked_label = item == getattr(clicked_item, 'label_text', None)
+                            clicked_label = is_label
+                            label_item = item if is_label else None
                             break
 
         if clicked_item:
@@ -459,11 +473,19 @@ class Canvas(QGraphicsScene):
 
             if (clicked_label and event.button() == Qt.LeftButton
                     and self.mode == CanvasMode.EDIT and not self.merge_selection_mode):
+                inverse, invertible = label_item.deviceTransform(device_transform).inverted()
+                target = label_item.target_at(inverse.map(device_transform.map(pt))) if invertible else None
                 for item in selected_before:
                     if item != clicked_shape:
                         item.setSelected(False)
                 clicked_shape.setSelected(True)
-                self.shape_label_clicked.emit(clicked_shape)
+                if target and target[0] in ("global", "class"):
+                    self.shape_attribute_clicked.emit(clicked_shape, target[0], target[1])
+                elif target and target[0] == "summary":
+                    self.shape_attributes_summary_clicked.emit(clicked_shape)
+                else:
+                    self.shape_label_clicked.emit(clicked_shape)
+                event.accept()
                 return
 
             # 首先让图元处理事件（如拖拽、调整大小等）

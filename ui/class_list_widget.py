@@ -418,9 +418,11 @@ class ClassListWidget(QWidget):
         if not self._current_dir:
             return
         # 保存 classes.txt
+        from jotmark.data.annotation_safety import backup_previous_annotation
+        from jotmark.data.exporter import Exporter
         class_file = os.path.join(self._current_dir, "classes.txt")
-        with open(class_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(self._class_list))
+        backup_previous_annotation(class_file)
+        Exporter._atomic_write_text(class_file, "\n".join(self._class_list))
         self._save_colors()
 
     def _save_colors(self):
@@ -429,8 +431,10 @@ class ClassListWidget(QWidget):
             return
         color_file = os.path.join(self._current_dir, "class_colors.json")
         try:
+            from jotmark.data.annotation_safety import backup_previous_annotation
+            from jotmark.data.exporter import Exporter
             data = {k: v.name() for k, v in self._class_colors.items()}
-            with open(color_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            backup_previous_annotation(color_file)
+            Exporter._atomic_write_text(color_file, json.dumps(data, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(f"保存类别颜色失败: {exc}")

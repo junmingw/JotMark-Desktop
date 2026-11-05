@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QDoubleValidator
+from PySide6.QtGui import QDoubleValidator, QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -86,12 +86,12 @@ class AttributeValuePickerDialog(QDialog):
         for option in options:
             item = QListWidgetItem(option)
             item.setData(Qt.UserRole, option)
+            self.list_widget.addItem(item)
             if multiple:
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked if option in selected else Qt.Unchecked)
             elif option in selected:
-                item.setSelected(True)
-            self.list_widget.addItem(item)
+                self.list_widget.setCurrentItem(item)
         layout.addWidget(self.list_widget, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
@@ -112,6 +112,7 @@ class AttributeValuePickerDialog(QDialog):
             item.setHidden(bool(keyword) and keyword not in item.text().lower())
 
     def _clear(self):
+        self.list_widget.setCurrentItem(None)
         self.list_widget.clearSelection()
         for index in range(self.list_widget.count()):
             item = self.list_widget.item(index)
@@ -126,8 +127,8 @@ class AttributeValuePickerDialog(QDialog):
                 for index in range(self.list_widget.count())
                 if self.list_widget.item(index).checkState() == Qt.Checked
             ]
-        current = self.list_widget.currentItem()
-        return current.data(Qt.UserRole) if current else ""
+        selected = self.list_widget.selectedItems()
+        return selected[0].data(Qt.UserRole) if selected else ""
 
 
 class AttributeValuePickerButton(QPushButton):
@@ -689,6 +690,80 @@ class AnnotationAttributeEditor(QWidget):
     def _open_scope_dialog(self, scope, title):
         dialog = AttributeScopeDialog(self, scope, title, self)
         dialog.exec()
+
+    def open_all_attribute_scopes(self):
+        """Show all properties when a canvas label is abbreviated."""
+        if not self._shape:
+            return
+        scopes = [("global", "公共属性（全部类别）"), ("class", "类别属性（仅当前类别）")]
+        scopes = [(scope, title) for scope, title in scopes if self._schemas.get(scope)]
+        if not scopes:
+            return
+        if len(scopes) == 1:
+            scope, title = scopes[0]
+        else:
+            title, accepted = QInputDialog.getItem(
+                self, "查看标注属性", "选择属性范围：", [title for _, title in scopes], 0, False
+            )
+            if not accepted:
+                return
+            scope = next((key for key, label in scopes if label == title), None)
+            if scope is None:
+                return
+        self._open_scope_dialog(scope, title)
+
+    def edit_attribute_value(self, scope, node_id):
+        """Open the same value picker used by the right pane for a canvas row."""
+        shape = self._shape
+        node = self._find_node(node_id, scope) if shape else None
+        if not node:
+            return
+        value = shape.attributes.get(node_id)
+        node_type = node.get("type", "single_select")
+        title = node.get("name", "属性")
+        options = node.get("options", [])
+
+        if node_type in ("single_select", "multi_select") and options:
+            dialog = AttributeValuePickerDialog(title, options, value, node_type == "multi_select", self)
+            if dialog.exec() != QDialog.Accepted or self._shape is not shape:
+                return
+            self._set_value(node_id, dialog.value(), scope)
+            return
+
+        if node_type == "boolean":
+            choices = ["是", "否", "清除"]
+            index = 0 if value is True else 1 if value is False else 2
+            selected, accepted = QInputDialog.getItem(self, title, "选择属性值：", choices, index, False)
+            if accepted and self._shape is shape and selected in choices:
+                self._set_value(node_id, {"是": True, "否": False, "清除": None}[selected], scope)
+            return
+
+        if node_type == "multi_select":
+            initial = ", ".join(value) if isinstance(value, list) else ""
+            prompt = "多个值用逗号分隔："
+        else:
+            initial = "" if value is None else str(value)
+            prompt = "请输入属性值（留空可清除）："
+        text, accepted = QInputDialog.getText(self, title, prompt, text=initial)
+        if not accepted or self._shape is not shape:
+            return
+        text = text.strip()
+        if node_type == "multi_select":
+            self._set_value(node_id, list(dict.fromkeys(part.strip() for part in text.split(",") if part.strip())), scope)
+        elif node_type == "number":
+            validator = QDoubleValidator(-1_000_000_000, 1_000_000_000, 6)
+            valid = not text or validator.validate(text, 0)[0] == QValidator.Acceptable
+            if text and valid:
+                try:
+                    float(text)
+                except ValueError:
+                    valid = False
+            if not valid:
+                QMessageBox.warning(self, "无效数值", "请输入有效数值，或留空以清除。")
+                return
+            self._set_number_value(node_id, text, scope)
+        else:
+            self._set_value(node_id, text, scope)
 
     def _add_nodes(self, nodes, scope, depth=0):
         values = self._shape.attributes
