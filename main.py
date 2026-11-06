@@ -70,7 +70,7 @@ from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointSh
 from jotmark.config.pose_template import TemplateManager
 from utils.message import DialogOver
 from jotmark.config.paths import get_weights_base_dir
-from ui.attribute_widgets import AttributeSchemaDialog
+from ui.attribute_widgets import AnnotationQuickEditDialog, AttributeSchemaDialog, ClassChangeAttributeDialog
 from ui.category_conversion_dialog import CategoryConversionDialog
 from ui.settings_dialog import SettingsDialog
 
@@ -1181,6 +1181,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.scene.set_transparent_label_background(
             str(transparent_setting).strip().lower() in {"1", "true", "yes", "on"}
         )
+        self.shape_double_click_mode = str(settings.value("shape_double_click_mode", "category_attributes"))
+        if self.shape_double_click_mode not in {"category_attributes", "category"}:
+            self.shape_double_click_mode = "category_attributes"
         try:
             edge_margin = int(settings.value("edge_click_margin", 40))
         except (ValueError, TypeError):
@@ -1645,7 +1648,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.scene.selectionChanged.connect(self.update_sam_merge_button)
         self.scene.canvas_item_hovered.connect(self.classListWidget.highlight_item_by_shape)
 
-        self.scene.shape_double_clicked.connect(self.edit_shape_label)  # 双击修改
+        self.scene.shape_double_clicked.connect(self.on_shape_double_clicked)
 
         # 类别管理组件信号
         self.classListWidget.class_added.connect(self._on_class_added_from_widget)
@@ -3606,7 +3609,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         else:
             self.scene.removeItem(shape)
 
-    def edit_shape_label(self, shape):
+    def edit_shape_label(self, shape, dialog_parent=None):
         """Reclassify a selected annotation without changing its geometry."""
         if not hasattr(shape, "label"):
             return
@@ -3616,9 +3619,33 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not choices:
             return
         current_index = choices.index(shape.label) if shape.label in choices else 0
-        new_label, accepted = QInputDialog.getItem(self, "调整标注类别", "类别：", choices, current_index, False)
+        parent = dialog_parent or self
+        new_label, accepted = QInputDialog.getItem(parent, "调整标注类别", "类别：", choices, current_index, False)
         if accepted and new_label and new_label != shape.label:
-            self.on_shape_class_reassigned(shape, new_label)
+            self.on_shape_class_reassigned(shape, new_label, dialog_parent=parent)
+
+    def on_shape_double_clicked(self, shape):
+        """Select the double-clicked shape and open the configured editor."""
+        if (shape.scene() is not self.scene or getattr(shape, "is_temp", False)
+                or self.scene.merge_selection_mode or self.scene.poly_pts):
+            return
+        for item in self.scene.selectedItems():
+            if item is not shape:
+                item.setSelected(False)
+        shape.setSelected(True)
+        self.update_attribute_editor()
+        if self.shape_double_click_mode == "category":
+            self.edit_shape_label(shape)
+            return
+        dialog = AnnotationQuickEditDialog(
+            self.attributeEditor, shape,
+            lambda popup: self.edit_shape_label(shape, dialog_parent=popup),
+            self,
+        )
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def on_shape_label_clicked(self, shape):
         if self.scene.mode == CanvasMode.EDIT:
@@ -3642,23 +3669,71 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """ClassListWidget item_changed fallback (rename already handled by class_renamed signal)"""
         pass
 
-    def on_shape_class_reassigned(self, shape, new_class_name):
-        """当用户在右侧历史类别列表点击父类别时，将画布上已选中图形的类别修改为该类别"""
+    def on_shape_class_reassigned(self, shape, new_class_name, dialog_parent=None):
+        """Safely reclassify one annotation from any canvas or tree entry."""
         new_class_name = (new_class_name or "").strip()
-        if not new_class_name:
-            return
+        if not new_class_name or shape.scene() is not self.scene:
+            return False
         old_label = getattr(shape, 'label', '')
         if old_label == new_class_name:
-            return  # 类别未变化，无需操作
+            return True
+
+        parent = dialog_parent or self
+        attributes = getattr(shape, "attributes", {})
+        if not isinstance(attributes, dict):
+            QMessageBox.warning(parent, "类别更换已取消", "标注属性格式无效，为避免数据丢失，未更换类别。")
+            return False
+        try:
+            self.attribute_store.verify_disk_revision()
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.warning(parent, "类别更换已取消", f"无法确认属性配置，未更换类别：\n{exc}")
+            return False
+
+        original_attributes = deepcopy(attributes)
+        public_ids = self.attribute_store.attribute_ids_for()
+        class_ids = self.attribute_store.all_class_attribute_ids() - public_ids
+        present = set(original_attributes)
+        public_values = present & public_ids
+        class_values = present & class_ids
+        unknown_values = present - public_ids - class_ids
+        keep_public = True
+        if public_values or class_values:
+            dialog = ClassChangeAttributeDialog(
+                old_label, new_class_name, len(public_values), len(class_values), len(unknown_values), parent,
+            )
+            try:
+                if dialog.exec() != QDialog.Accepted:
+                    return False
+                keep_public = dialog.keep_public_attributes()
+            finally:
+                dialog.deleteLater()
+        # Preserve the current revision before this destructive change.  If
+        # the save fails, the canvas and its category remain untouched.
+        if not self._ensure_pending_annotation_saved():
+            return False
+        try:
+            self.attribute_store.verify_disk_revision()
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.warning(parent, "类别更换已取消", f"属性配置发生变化，未更换类别：\n{exc}")
+            return False
+        if shape.scene() is not self.scene or shape.label != old_label or shape.attributes != original_attributes:
+            QMessageBox.warning(parent, "类别更换已取消", "确认期间标注已发生变化，请重新操作。")
+            return False
 
         if new_class_name not in self.class_list:
-            self.add_class_to_list(new_class_name)
-            self.save_classes()
+            try:
+                self.add_class_to_list(new_class_name)
+                self.save_classes()
+            except Exception as exc:
+                if new_class_name in self.class_list:
+                    self.class_list.remove(new_class_name)
+                self.classListWidget.remove_class(new_class_name)
+                QMessageBox.warning(parent, "类别更换已取消", f"类别列表保存失败，标注未更换，请检查类别文件：\n{exc}")
+                return False
 
         shape.label = new_class_name
-        # Attribute values are class-scoped.  Carrying values from the old
-        # class into the new class would create invalid, hidden metadata.
-        shape.attributes = {}
+        removed_ids = class_ids | (set() if keep_public else public_ids)
+        shape.attributes = {key: value for key, value in original_attributes.items() if key not in removed_ids}
         if hasattr(shape, 'update_label_text'):
             shape.update_label_text(new_class_name)
         if hasattr(shape, 'update_label_position'):
@@ -3671,6 +3746,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.update_annotation_tree()
         self.update_attribute_editor()
         self.scene.state_changed.emit()
+        return True
 
     def manage_class_attributes(self, class_name):
         """Open the schema editor for the selected class."""
@@ -4191,6 +4267,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if transparent != self.scene.transparent_label_background:
             self.scene.set_transparent_label_background(transparent)
             QSettings("luohuabuxiema", "JotMark").setValue("transparent_label_background", transparent)
+        double_click_mode = dialog.shape_double_click_mode.currentData()
+        if double_click_mode != self.shape_double_click_mode:
+            self.shape_double_click_mode = double_click_mode
+            QSettings("luohuabuxiema", "JotMark").setValue("shape_double_click_mode", double_click_mode)
         margin = dialog.edge_click_margin.value()
         if margin != self.scene.edge_click_margin:
             self.scene.edge_click_margin = margin

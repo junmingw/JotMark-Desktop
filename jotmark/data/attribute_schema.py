@@ -245,6 +245,24 @@ class ClassAttributeStore:
         collect(self._classes.get(class_name, []))
         return ids
 
+    def all_class_attribute_ids(self) -> set[str]:
+        """Return all known category-specific IDs, including nested nodes."""
+        ids = set()
+        for nodes in self._classes.values():
+            ids.update(self._collect_ids(nodes))
+        return ids
+
+    def verify_disk_revision(self):
+        """Reject use of an unreadable or externally changed project schema."""
+        if self.load_error:
+            raise RuntimeError(f"属性文件读取失败：{self.load_error}")
+        if not self.path:
+            return
+        actual = file_fingerprint(self.path)
+        if ((self._fingerprint_known and actual != self._disk_fingerprint)
+                or (not self._fingerprint_known and actual is not None)):
+            raise RuntimeError("属性文件已被其他程序修改或尚未读取，请重新打开项目。")
+
     @staticmethod
     def _collect_ids(nodes) -> set[str]:
         ids = set()

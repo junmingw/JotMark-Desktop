@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSplitter,
     QTreeWidget,
@@ -236,6 +237,153 @@ class BooleanValuePicker(QWidget):
         self.no_button.setChecked(False)
         self.group.setExclusive(True)
         self.value_changed.emit("")
+
+
+class ClassChangeAttributeDialog(QDialog):
+    """Require an explicit per-instance attribute policy before reclassifying."""
+
+    def __init__(self, old_label, new_label, public_count, class_count, unknown_count, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("确认更换标注类别")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        summary = QLabel(f"将标注类别从“{old_label}”更换为“{new_label}”。")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        category_note = QLabel(f"将清除该标注的 {class_count} 项已保存类别专属属性（包括子属性）。")
+        category_note.setWordWrap(True)
+        layout.addWidget(category_note)
+        public_note = QLabel(f"该标注有 {public_count} 项公共属性值，请选择处理方式：")
+        public_note.setWordWrap(True)
+        layout.addWidget(public_note)
+        self.keep_public = QRadioButton("保留公共属性（推荐）")
+        self.clear_public = QRadioButton("清除公共属性")
+        self.keep_public.setChecked(True)
+        self.clear_public.setEnabled(public_count > 0)
+        layout.addWidget(self.keep_public)
+        layout.addWidget(self.clear_public)
+        if unknown_count:
+            note = QLabel(f"另有 {unknown_count} 项无法归属的历史属性值，将保留，避免误删。")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确认更换")
+        buttons.button(QDialogButtonBox.Cancel).setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def keep_public_attributes(self):
+        return self.keep_public.isChecked()
+
+
+class AnnotationQuickEditDialog(QDialog):
+    """Edit one selected shape's category and visible attributes together."""
+
+    def __init__(self, editor, shape, edit_category, parent=None):
+        super().__init__(parent or editor)
+        self.editor = editor
+        self.shape = shape
+        self.edit_category = edit_category
+        self.attribute_buttons = {}
+        self._refresh_scheduled = False
+        self.setWindowTitle("编辑标注类别和属性")
+        self.resize(460, 520)
+
+        layout = QVBoxLayout(self)
+        hint = QLabel("点击类别或属性进行修改；父属性填写后显示子属性。修改立即应用并触发自动保存，失败时会提示。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.category_button = QPushButton()
+        self.category_button.setToolTip("点击调整该标注的类别")
+        self.category_button.clicked.connect(self._edit_category)
+        layout.addWidget(self.category_button)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.content = QWidget()
+        self.attributes_layout = QVBoxLayout(self.content)
+        self.attributes_layout.setContentsMargins(4, 4, 4, 4)
+        self.attributes_layout.setSpacing(6)
+        scroll.setWidget(self.content)
+        layout.addWidget(scroll, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._rebuild()
+
+    @staticmethod
+    def _display_value(value):
+        if isinstance(value, bool):
+            return "是" if value else "否"
+        if isinstance(value, (list, tuple)):
+            return "、".join(str(item) for item in value) or "未填写"
+        return str(value) if value is not None and value != "" else "未填写"
+
+    def _schedule_rebuild(self):
+        if not self._refresh_scheduled:
+            self._refresh_scheduled = True
+            QTimer.singleShot(0, self._rebuild_if_visible)
+
+    def _rebuild_if_visible(self):
+        self._refresh_scheduled = False
+        if self.isVisible():
+            self._rebuild()
+
+    def _rebuild(self):
+        self.category_button.setText(f"类别：{getattr(self.shape, 'label', '')}  ›")
+        self.attribute_buttons = {}
+        while self.attributes_layout.count():
+            item = self.attributes_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if self.editor._shape is not self.shape:
+            self.attributes_layout.addWidget(QLabel("当前标注已不可编辑，请关闭窗口后重新选择。"))
+            return
+        values = self.shape.attributes
+        has_attributes = False
+
+        def add_nodes(nodes, scope, depth=0):
+            for node in nodes:
+                node_id = node.get("id")
+                if not node_id:
+                    continue
+                name = str(node.get("name") or "属性")
+                value = values.get(node_id)
+                text = f"{'　' * depth}{name}：{self._display_value(value)}  ›"
+                button = QPushButton(text)
+                button.setCursor(Qt.PointingHandCursor)
+                button.setToolTip(text)
+                button.setMinimumHeight(32)
+                button.setStyleSheet("text-align: left; padding: 5px 9px;")
+                button.clicked.connect(lambda _checked=False, s=scope, key=node_id: self._edit_attribute(s, key))
+                self.attributes_layout.addWidget(button)
+                self.attribute_buttons[(scope, node_id)] = button
+                if self.editor._has_value(value):
+                    add_nodes(node.get("children", []), scope, depth + 1)
+
+        for scope, title in (("global", "公共属性"), ("class", "当前类别属性")):
+            nodes = self.editor._schemas.get(scope, [])
+            if nodes:
+                has_attributes = True
+                heading = QLabel(title)
+                heading.setStyleSheet("font-weight: 600; padding-top: 6px;")
+                self.attributes_layout.addWidget(heading)
+                add_nodes(nodes, scope)
+        if not has_attributes:
+            self.attributes_layout.addWidget(QLabel("当前类别尚未配置公共属性或类别属性。"))
+        self.attributes_layout.addStretch(1)
+
+    def _edit_category(self):
+        if self.editor._shape is self.shape:
+            self.edit_category(self)
+            self._schedule_rebuild()
+
+    def _edit_attribute(self, scope, node_id):
+        if self.editor._shape is self.shape:
+            self.editor.edit_attribute_value(scope, node_id, dialog_parent=self)
+            self._schedule_rebuild()
 
 
 class AttributeScopeDialog(QDialog):
@@ -712,7 +860,7 @@ class AnnotationAttributeEditor(QWidget):
                 return
         self._open_scope_dialog(scope, title)
 
-    def edit_attribute_value(self, scope, node_id):
+    def edit_attribute_value(self, scope, node_id, dialog_parent=None):
         """Open the same value picker used by the right pane for a canvas row."""
         shape = self._shape
         node = self._find_node(node_id, scope) if shape else None
@@ -722,9 +870,10 @@ class AnnotationAttributeEditor(QWidget):
         node_type = node.get("type", "single_select")
         title = node.get("name", "属性")
         options = node.get("options", [])
+        parent = dialog_parent or self
 
         if node_type in ("single_select", "multi_select") and options:
-            dialog = AttributeValuePickerDialog(title, options, value, node_type == "multi_select", self)
+            dialog = AttributeValuePickerDialog(title, options, value, node_type == "multi_select", parent)
             if dialog.exec() != QDialog.Accepted or self._shape is not shape:
                 return
             self._set_value(node_id, dialog.value(), scope)
@@ -733,7 +882,7 @@ class AnnotationAttributeEditor(QWidget):
         if node_type == "boolean":
             choices = ["是", "否", "清除"]
             index = 0 if value is True else 1 if value is False else 2
-            selected, accepted = QInputDialog.getItem(self, title, "选择属性值：", choices, index, False)
+            selected, accepted = QInputDialog.getItem(parent, title, "选择属性值：", choices, index, False)
             if accepted and self._shape is shape and selected in choices:
                 self._set_value(node_id, {"是": True, "否": False, "清除": None}[selected], scope)
             return
@@ -744,7 +893,7 @@ class AnnotationAttributeEditor(QWidget):
         else:
             initial = "" if value is None else str(value)
             prompt = "请输入属性值（留空可清除）："
-        text, accepted = QInputDialog.getText(self, title, prompt, text=initial)
+        text, accepted = QInputDialog.getText(parent, title, prompt, text=initial)
         if not accepted or self._shape is not shape:
             return
         text = text.strip()
@@ -759,7 +908,7 @@ class AnnotationAttributeEditor(QWidget):
                 except ValueError:
                     valid = False
             if not valid:
-                QMessageBox.warning(self, "无效数值", "请输入有效数值，或留空以清除。")
+                QMessageBox.warning(parent, "无效数值", "请输入有效数值，或留空以清除。")
                 return
             self._set_number_value(node_id, text, scope)
         else:
@@ -891,9 +1040,18 @@ class AnnotationAttributeEditor(QWidget):
     def _emit_class_label_change(self):
         if self._building or not self._shape:
             return
+        shape = self._shape
         new_label = self.class_label_combo.currentText().strip()
-        if new_label and new_label != getattr(self._shape, "label", ""):
-            self.class_label_changed.emit(self._shape, new_label)
+        if new_label and new_label != getattr(shape, "label", ""):
+            self.class_label_changed.emit(shape, new_label)
+            # A cancelled/failed change must not leave the combo displaying an
+            # uncommitted category (or prompt again on editingFinished).
+            if self._shape is shape:
+                self._building = True
+                try:
+                    self.class_label_combo.setCurrentText(getattr(shape, "label", ""))
+                finally:
+                    self._building = False
 
     def _set_number_value(self, node_id, text, scope):
         text = text.strip()

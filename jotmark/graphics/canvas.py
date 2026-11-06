@@ -685,7 +685,22 @@ class Canvas(QGraphicsScene):
         if not self.is_inside_image(pt) and self.projected_edge_vertex(pt) is None:
             return
 
-        for item in self.items(pt) if self.is_inside_image(pt) else ():
+        current_model_key = getattr(self.sam_client, 'current_model_key', None) or ''
+        is_sam_model = current_model_key.startswith('sam')
+        if (event.button() == Qt.LeftButton and self.mode in (CanvasMode.POLY, CanvasMode.LINE)
+                and self.poly_pts and not (self.mode == CanvasMode.POLY and self.sam_enabled and is_sam_model)):
+            min_points = 3 if self.mode == CanvasMode.POLY else 2
+            if len(self.poly_pts) >= min_points:
+                self.finish_poly_shape()
+            event.accept()
+            return
+
+        view = next((v for v in self.views() if v.viewport() is event.widget()), None)
+        if not view and self.views():
+            view = self.views()[0]
+        transform = view.viewportTransform() if view else QTransform()
+        items = self.items(pt, Qt.IntersectsItemShape, Qt.DescendingOrder, transform) if self.is_inside_image(pt) else ()
+        for item in items if event.button() == Qt.LeftButton else ():
             from jotmark.graphics.shapes import BaseShape, HandleItem
             if getattr(item, 'is_temp', False):
                 continue
@@ -703,8 +718,6 @@ class Canvas(QGraphicsScene):
                     self.shape_double_clicked.emit(parent)
                     return
 
-        current_model_key = getattr(self.sam_client, 'current_model_key', None) or ''
-        is_sam_model = current_model_key.startswith('sam')
         if event.button() == Qt.LeftButton and self.mode in (CanvasMode.POLY, CanvasMode.LINE) and not (self.mode == CanvasMode.POLY and self.sam_enabled and is_sam_model):
             min_points = 3 if self.mode == CanvasMode.POLY else 2
             if len(self.poly_pts) >= min_points:

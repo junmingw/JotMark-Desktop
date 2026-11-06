@@ -125,6 +125,7 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         self.assertEqual(dialog.line_width.singleStep(), 0.5)
         dialog.canvas_attributes.setChecked(False)
         dialog.transparent_label_background.setChecked(True)
+        dialog.shape_double_click_mode.setCurrentIndex(dialog.shape_double_click_mode.findData("category"))
         dialog.edge_click_margin.setValue(70)
         dialog.extensions.setChecked(True)
         dialog.sort_key.setCurrentIndex(dialog.sort_key.findData("size"))
@@ -144,6 +145,8 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         self.assertFalse(stored.value("show_canvas_attributes", type=bool))
         self.assertTrue(stored.value("transparent_label_background", type=bool))
         self.assertTrue(win.scene.transparent_label_background)
+        self.assertEqual(win.shape_double_click_mode, "category")
+        self.assertEqual(stored.value("shape_double_click_mode"), "category")
         self.assertEqual(win.scene.annotation_line_width, 0.5)
         from main import MainWindow
         another = MainWindow()
@@ -153,6 +156,7 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
             self.assertTrue(another.is_dark_theme)
             self.assertFalse(another.scene.show_canvas_attributes)
             self.assertTrue(another.scene.transparent_label_background)
+            self.assertEqual(another.shape_double_click_mode, "category")
         finally:
             another.close()
 
@@ -169,12 +173,16 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         dialog.edge_click_margin.setValue(0 if original_margin != 0 else 20)
         initial_transparency = win.scene.transparent_label_background
         dialog.transparent_label_background.setChecked(not initial_transparency)
+        initial_double_click_mode = win.shape_double_click_mode
+        dialog.shape_double_click_mode.setCurrentIndex(dialog.shape_double_click_mode.findData(
+            "category" if initial_double_click_mode != "category" else "category_attributes"))
         dialog.exec = lambda: QDialog.Rejected
         with patch("main.SettingsDialog", return_value=dialog):
             win.show_settings_dialog()
         self.assertEqual(win.scene.annotation_line_width, initial_width)
         self.assertEqual(win.scene.edge_click_margin, original_margin)
         self.assertEqual(win.scene.transparent_label_background, initial_transparency)
+        self.assertEqual(win.shape_double_click_mode, initial_double_click_mode)
 
         tree = win.classListWidget
         tree.preferred_class = "car"
@@ -202,6 +210,24 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
             self.assertEqual(dialog.output_dir.text(), "")
             win.set_annotation_output_dir(dialog.output_dir.text())
             self.assertEqual(win.annotation_output_dir, "")
+
+    def test_double_click_mode_defaults_and_invalid_saved_value(self):
+        from PySide6.QtCore import QSettings
+        from main import MainWindow
+        settings = QSettings("luohuabuxiema", "JotMark")
+        settings.remove("shape_double_click_mode")
+        default_window = MainWindow()
+        try:
+            self.assertEqual(default_window.shape_double_click_mode, "category_attributes")
+        finally:
+            default_window.close()
+        settings.setValue("shape_double_click_mode", "unsupported")
+        invalid_window = MainWindow()
+        try:
+            self.assertEqual(invalid_window.shape_double_click_mode, "category_attributes")
+        finally:
+            invalid_window.close()
+            settings.remove("shape_double_click_mode")
 
     def test_saved_annotations_reload_with_display_width(self):
         from PySide6.QtGui import QImage

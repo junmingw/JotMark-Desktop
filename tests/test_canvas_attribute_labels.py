@@ -120,6 +120,7 @@ class CanvasAttributeLabelTests(unittest.TestCase):
         self.assertEqual(Exporter.extract_shapes(self.win.scene), before)
 
     def test_attribute_edits_schema_rename_and_category_change_update_immediately(self):
+        from PySide6.QtWidgets import QDialog
         shape = self._shape()
         shape.attributes = {"kind": "road_edge", "review": "normal"}
         self.win.update_annotation_tree()
@@ -130,9 +131,10 @@ class CanvasAttributeLabelTests(unittest.TestCase):
         with patch("main.QInputDialog.getText", return_value=("边界类型", True)):
             self.win.rename_attribute_label(shape, "kind", "class")
         self.assertIn("◆ 边界类型：curb", shape.label_text.toPlainText())
-        self.win.on_shape_class_reassigned(shape, "other")
-        self.assertEqual(shape.label_text.toPlainText(), "other")
-        self.assertEqual(shape.attributes, {})
+        with patch("main.ClassChangeAttributeDialog.exec", return_value=QDialog.Accepted):
+            self.assertTrue(self.win.on_shape_class_reassigned(shape, "other"))
+        self.assertTrue(shape.label_text.toPlainText().startswith("other"))
+        self.assertEqual(shape.attributes, {"review": "normal"})
 
     def test_narrow_shape_and_zoom_keep_label_readable_and_in_view(self):
         from PySide6.QtCore import QPointF
