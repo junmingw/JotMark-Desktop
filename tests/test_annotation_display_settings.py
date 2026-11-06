@@ -124,6 +124,7 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         dialog.line_width.setValue(0.5)
         self.assertEqual(dialog.line_width.singleStep(), 0.5)
         dialog.canvas_attributes.setChecked(False)
+        dialog.transparent_label_background.setChecked(True)
         dialog.edge_click_margin.setValue(70)
         dialog.extensions.setChecked(True)
         dialog.sort_key.setCurrentIndex(dialog.sort_key.findData("size"))
@@ -141,6 +142,8 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         self.assertTrue(win.is_dark_theme)
         self.assertFalse(win.scene.show_canvas_attributes)
         self.assertFalse(stored.value("show_canvas_attributes", type=bool))
+        self.assertTrue(stored.value("transparent_label_background", type=bool))
+        self.assertTrue(win.scene.transparent_label_background)
         self.assertEqual(win.scene.annotation_line_width, 0.5)
         from main import MainWindow
         another = MainWindow()
@@ -149,6 +152,7 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
             self.assertEqual(another.scene.edge_click_margin, 70)
             self.assertTrue(another.is_dark_theme)
             self.assertFalse(another.scene.show_canvas_attributes)
+            self.assertTrue(another.scene.transparent_label_background)
         finally:
             another.close()
 
@@ -163,11 +167,14 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         dialog.line_width.setValue(12 if initial_width != 12 else 0.5)
         original_margin = win.scene.edge_click_margin
         dialog.edge_click_margin.setValue(0 if original_margin != 0 else 20)
+        initial_transparency = win.scene.transparent_label_background
+        dialog.transparent_label_background.setChecked(not initial_transparency)
         dialog.exec = lambda: QDialog.Rejected
         with patch("main.SettingsDialog", return_value=dialog):
             win.show_settings_dialog()
         self.assertEqual(win.scene.annotation_line_width, initial_width)
         self.assertEqual(win.scene.edge_click_margin, original_margin)
+        self.assertEqual(win.scene.transparent_label_background, initial_transparency)
 
         tree = win.classListWidget
         tree.preferred_class = "car"

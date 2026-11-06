@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsEllipseItem, \
-    QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsObject, QMenu
+    QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsObject, QGraphicsDropShadowEffect, QMenu
 from PySide6.QtGui import QPen, QBrush, QColor, QPolygonF, QFont, QFontMetrics, QTransform, QPainter, QAction, QPainterPath, QPainterPathStroker
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer
 from html import escape
@@ -85,12 +85,31 @@ class AnnotationLabelItem(QGraphicsTextItem):
         self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self.setCursor(Qt.PointingHandCursor)
         self.setZValue(1001)
+        self.transparent_background = False
 
     def paint(self, painter, option, widget=None):
-        painter.setPen(QPen(QColor(148, 163, 184, 170), 0.8))
-        painter.setBrush(QColor(15, 23, 42, 230))
-        painter.drawRoundedRect(self.boundingRect(), 4, 4)
+        if not self.transparent_background:
+            painter.setPen(QPen(QColor(148, 163, 184, 170), 0.8))
+            painter.setBrush(QColor(15, 23, 42, 230))
+            painter.drawRoundedRect(self.boundingRect(), 4, 4)
         super().paint(painter, option, widget)
+
+    def set_background_transparent(self, transparent):
+        transparent = bool(transparent)
+        if self.transparent_background != transparent:
+            self.transparent_background = transparent
+            if transparent:
+                # QTextCharFormat text outlines can replace the glyph fill in
+                # Qt, making white text black. Draw a shadow behind the intact
+                # colored text instead, without adding a rectangular backdrop.
+                shadow = QGraphicsDropShadowEffect()
+                shadow.setColor(QColor(0, 0, 0, 240))
+                shadow.setBlurRadius(4)
+                shadow.setOffset(0, 0)
+                self.setGraphicsEffect(shadow)
+            else:
+                self.setGraphicsEffect(None)
+            self.update()
 
     def _wrapped(self, text, max_lines=2, bold=False):
         """Wrap by rendered pixel width, including long CJK/English values."""
@@ -337,8 +356,8 @@ class HandleItem(QGraphicsItem):
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemSendsGeometryChanges)
         self.setZValue(1000)
         self.hide()
-        self._mouse_press_pos = None
-        self._is_moved = False
+        self._vertex_press_scene = None
+        self._vertex_start_pos = None
         
         # Dimensions
         if self.handle_type == 'h_capsule':
@@ -380,27 +399,47 @@ class HandleItem(QGraphicsItem):
         super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event):
-        self._mouse_press_pos = event.pos()
-        self._is_moved = False
-        if self.parentItem():
-            self.parentItem().setSelected(True)
-            self.parentItem().setFlag(QGraphicsItem.ItemIsMovable, False)
+        parent = self.parentItem()
+        if event.button() == Qt.LeftButton and parent:
+            if hasattr(parent, 'remove_handle'):
+                self._vertex_press_scene = QPointF(event.scenePos())
+                self._vertex_start_pos = QPointF(self.pos())
+            parent.setSelected(True)
+            parent.setFlag(QGraphicsItem.ItemIsMovable, False)
         super().mousePressEvent(event)
 
-    def mouseMoveEvent(self, event):
-        if self._mouse_press_pos and (event.pos() - self._mouse_press_pos).manhattanLength() > 2:
-            self._is_moved = True
-        super().mouseMoveEvent(event)
-
     def mouseReleaseEvent(self, event):
+        parent = self.parentItem()
+        if (event.button() == Qt.LeftButton and parent and self._vertex_press_scene is not None
+                and self._vertex_start_pos is not None):
+            # A moving item's event.pos() follows the item and cannot reliably
+            # distinguish a drag from a click.  Commit the final release in the
+            # parent's coordinates, even if Qt delivered no last move event.
+            delta = parent.mapFromScene(event.scenePos()) - parent.mapFromScene(self._vertex_press_scene)
+            self.setPos(self._vertex_start_pos + delta)
         super().mouseReleaseEvent(event)
-        if self.parentItem():
-            self.parentItem().setFlag(QGraphicsItem.ItemIsMovable, True)
+        self._vertex_press_scene = None
+        self._vertex_start_pos = None
+        if parent and event.button() == Qt.LeftButton:
+            parent.setFlag(QGraphicsItem.ItemIsMovable, True)
 
-        if not self._is_moved and event.button() == Qt.LeftButton:
-            parent = self.parentItem()
-            if hasattr(parent, 'remove_handle'):
-                parent.remove_handle(self)
+    def contextMenuEvent(self, event):
+        parent = self.parentItem()
+        scene = self.scene()
+        if not parent or not hasattr(parent, 'remove_handle') or not scene:
+            return super().contextMenuEvent(event)
+        if getattr(scene, 'merge_selection_mode', False) or getattr(scene, 'poly_pts', []):
+            event.ignore()
+            return
+        menu = QMenu()
+        action = menu.addAction("删除此顶点")
+        minimum = 3 if isinstance(parent, PolyShape) else 2
+        action.setEnabled(len(parent.handles) > minimum)
+        if menu.exec(event.screenPos()) == action and action.isEnabled():
+            parent.remove_handle(self)
+            if hasattr(scene, 'state_changed'):
+                scene.state_changed.emit()
+        event.accept()
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange and self.scene() and self.parentItem():
@@ -1243,6 +1282,7 @@ class PolyShape(QGraphicsPolygonItem, BaseShape):
 
     def mouseReleaseEvent(self, event):
         if self._dragging_edge_idx != -1:
+            self.mouseMoveEvent(event)
             self._dragging_edge_idx = -1
             self.setFlag(QGraphicsItem.ItemIsMovable, True)
             event.accept()
@@ -1468,6 +1508,7 @@ class PolylineShape(QGraphicsPathItem, BaseShape):
 
     def mouseReleaseEvent(self, event):
         if self._dragging_edge_idx != -1:
+            self.mouseMoveEvent(event)
             self._dragging_edge_idx = -1
             self.setFlag(QGraphicsItem.ItemIsMovable, True)
             if self.scene() and hasattr(self.scene(), 'state_changed'):

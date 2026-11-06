@@ -266,6 +266,91 @@ class CanvasAttributeLabelTests(unittest.TestCase):
         self.assertEqual(other.attributes["visibility"], ["visible"])
         self.assertIn("partly_truncated", shape.label_text.toPlainText())
 
+    def test_transparent_labels_remain_readable_clickable_and_presentation_only(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage, QPainter
+        from PySide6.QtWidgets import QDialog, QGraphicsDropShadowEffect, QStyleOptionGraphicsItem
+        from jotmark.data.exporter import Exporter
+        shape = self._shape(x=300)
+        shape.attributes = {"visibility": ["visible"]}
+        self.win.update_annotation_tree()
+        before = Exporter.extract_shapes(self.win.scene)
+        label = shape.label_text
+
+        def render_label():
+            image = QImage(int(label.boundingRect().width()) + 2,
+                           int(label.boundingRect().height()) + 2, QImage.Format_ARGB32)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            label.paint(painter, QStyleOptionGraphicsItem())
+            painter.end()
+            return image
+
+        opaque = render_label()
+        self.win.scene.set_transparent_label_background(True)
+        transparent = render_label()
+        self.assertGreater(opaque.pixelColor(8, 2).alpha(), 0)
+        self.assertEqual(transparent.pixelColor(8, 2).alpha(), 0)
+        self.assertTrue(label.transparent_background)
+        self.assertIsInstance(label.graphicsEffect(), QGraphicsDropShadowEffect)
+        bright_pixels = sum(
+            color.alpha() > 160 and min(color.red(), color.green(), color.blue()) > 160
+            for y in range(transparent.height()) for x in range(transparent.width())
+            for color in (transparent.pixelColor(x, y),)
+        )
+        self.assertGreater(bright_pixels, 50, "透明模式的文字应是明亮的，而不是黑色描边")
+        self.assertEqual(Exporter.extract_shapes(self.win.scene), before)
+        with patch("ui.attribute_widgets.AttributeValuePickerDialog.exec", return_value=QDialog.Accepted), \
+             patch("ui.attribute_widgets.AttributeValuePickerDialog.value", return_value=["partly_truncated"]):
+            self._click_label_target(shape, ("global", "visibility"))
+        self.assertEqual(shape.attributes["visibility"], ["partly_truncated"])
+        self.assertIsInstance(label.graphicsEffect(), QGraphicsDropShadowEffect)
+
+        new_shape = self._shape(x=400)
+        self.assertTrue(new_shape.label_text.transparent_background)
+        self.win.scene.set_transparent_label_background(False)
+        self.assertFalse(label.transparent_background)
+        self.assertFalse(new_shape.label_text.transparent_background)
+        self.assertIsNone(label.graphicsEffect())
+
+    def test_transparent_label_keeps_contrast_on_dark_and_light_canvas(self):
+        from PySide6.QtCore import QRectF, Qt
+        from PySide6.QtGui import QColor, QImage, QPainter, QPen
+        from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsScene
+        from jotmark.graphics.shapes import AnnotationLabelItem
+        scene = QGraphicsScene()
+        parent = QGraphicsRectItem(QRectF(0, 0, 240, 100))
+        parent.setPen(QPen(Qt.NoPen))
+        scene.addItem(parent)
+        label = AnnotationLabelItem(parent)
+        label.set_content("boundary 道路边缘", [("global", "visibility", "visible", "visibility")])
+        label.set_background_transparent(True)
+        scene.setSceneRect(0, 0, 240, 100)
+
+        def render(background):
+            image = QImage(240, 100, QImage.Format_ARGB32)
+            image.fill(QColor(background))
+            painter = QPainter(image)
+            scene.render(painter, QRectF(0, 0, 240, 100), scene.sceneRect())
+            painter.end()
+            return image
+
+        dark = render("black")
+        light = render("white")
+        dark_bright = sum(
+            min(color.red(), color.green(), color.blue()) > 170
+            for y in range(75) for x in range(220)
+            for color in (dark.pixelColor(x, y),)
+        )
+        light_shadow = sum(
+            max(color.red(), color.green(), color.blue()) < 210
+            for y in range(75) for x in range(220)
+            for color in (light.pixelColor(x, y),)
+        )
+        self.assertGreater(dark_bright, 50, "深色画面上应能看到明亮文字")
+        self.assertGreater(light_shadow, 30, "浅色画面上文字应保留深色阴影")
+        self.assertEqual(light.pixelColor(220, 90), QColor("white"))
+
     def test_click_attribute_after_zoom_and_click_category_remains_reclassification(self):
         from PySide6.QtCore import QPointF
         from PySide6.QtWidgets import QDialog

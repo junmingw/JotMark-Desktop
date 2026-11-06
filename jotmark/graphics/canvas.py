@@ -65,6 +65,7 @@ class Canvas(QGraphicsScene):
         self.mode = CanvasMode.RECT
         self.annotation_line_width = 2
         self.show_canvas_attributes = True
+        self.transparent_label_background = False
         self.edge_click_margin = 40  # screen pixels; 0 disables off-image vertex placement
         self.img_item = None
         self._image_size = QSize()
@@ -101,6 +102,19 @@ class Canvas(QGraphicsScene):
         self.v_line.hide()
         self.addItem(self.h_line)
         self.addItem(self.v_line)
+
+    def addItem(self, item):
+        super().addItem(item)
+        label = getattr(item, "label_text", None)
+        if label is not None:
+            label.set_background_transparent(self.transparent_label_background)
+
+    def set_transparent_label_background(self, transparent):
+        self.transparent_label_background = bool(transparent)
+        for item in self.items():
+            label = getattr(item, "label_text", None)
+            if label is not None:
+                label.set_background_transparent(self.transparent_label_background)
 
     def set_annotation_line_width(self, width):
         # Keep the runtime, the settings dialog and saved preferences on the
@@ -627,7 +641,10 @@ class Canvas(QGraphicsScene):
 
         current_model_key = getattr(self.sam_client, 'current_model_key', None) or ''
         is_sam_model = current_model_key.startswith('sam')
-        if self.sam_enabled and is_sam_model: return
+        if self.sam_enabled and is_sam_model:
+            # Existing manual shapes can still be edited while SAM is enabled.
+            self.state_changed.emit()
+            return
 
         if event.button() == Qt.LeftButton and self.drawing:
             self.drawing = False
@@ -648,6 +665,20 @@ class Canvas(QGraphicsScene):
                         self.shape_drawn.emit(RotatedRectShape(cx, cy, w, h, 0))
 
         self.state_changed.emit()
+
+    def contextMenuEvent(self, event):
+        # Handles must win over fixed-screen-size text labels when they
+        # overlap, just as they do in the left-button hit test.
+        if self.is_inside_image(event.scenePos()) and not self.merge_selection_mode and not self.poly_pts:
+            view = next((v for v in self.views() if v.viewport() is event.widget()), None)
+            if not view and self.views():
+                view = self.views()[0]
+            transform = view.viewportTransform() if view else QTransform()
+            for item in self.items(event.scenePos(), Qt.IntersectsItemShape, Qt.DescendingOrder, transform):
+                if isinstance(item, HandleItem) and item.isVisible() and hasattr(item.parentItem(), 'remove_handle'):
+                    item.contextMenuEvent(event)
+                    return
+        super().contextMenuEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         pt = event.scenePos()

@@ -1177,6 +1177,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.scene.set_annotation_line_width(line_width)
         show_attributes_setting = settings.value("show_canvas_attributes", True)
         self.scene.show_canvas_attributes = str(show_attributes_setting).strip().lower() not in {"0", "false", "no", "off"}
+        transparent_setting = settings.value("transparent_label_background", False)
+        self.scene.set_transparent_label_background(
+            str(transparent_setting).strip().lower() in {"1", "true", "yes", "on"}
+        )
         try:
             edge_margin = int(settings.value("edge_click_margin", 40))
         except (ValueError, TypeError):
@@ -4183,6 +4187,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.scene.show_canvas_attributes = show_attributes
             QSettings("luohuabuxiema", "JotMark").setValue("show_canvas_attributes", show_attributes)
             self.update_annotation_tree()
+        transparent = dialog.transparent_label_background.isChecked()
+        if transparent != self.scene.transparent_label_background:
+            self.scene.set_transparent_label_background(transparent)
+            QSettings("luohuabuxiema", "JotMark").setValue("transparent_label_background", transparent)
         margin = dialog.edge_click_margin.value()
         if margin != self.scene.edge_click_margin:
             self.scene.edge_click_margin = margin
