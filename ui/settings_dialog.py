@@ -5,6 +5,8 @@ from PySide6.QtWidgets import (
     QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QSpinBox, QVBoxLayout,
 )
+from jotmark.graphics.shapes import MIN_VERTEX_DIAMETER, MAX_VERTEX_DIAMETER
+from jotmark.graphics.canvas import MIN_CLOSE_HINT_SCALE, MAX_CLOSE_HINT_SCALE
 
 
 class SettingsDialog(QDialog):
@@ -24,6 +26,31 @@ class SettingsDialog(QDialog):
         self.line_width.setValue(window.scene.annotation_line_width)
         self.line_width.setToolTip("调整画布上标注的显示线宽；不改变保存的坐标或导出格式")
         form.addRow("标注线宽", self.line_width)
+        self.vertex_diameter = QDoubleSpinBox()
+        self.vertex_diameter.setRange(MIN_VERTEX_DIAMETER, MAX_VERTEX_DIAMETER)
+        self.vertex_diameter.setSingleStep(0.5)
+        self.vertex_diameter.setDecimals(1)
+        self.vertex_diameter.setSuffix(" 图像像素")
+        self.vertex_diameter.setValue(window.scene.vertex_handle_diameter)
+        self.vertex_diameter.setToolTip("调整多边形和折线顶点圆圈的直径；默认 7，随图片缩放，不影响坐标。")
+        form.addRow("多边形/折线顶点直径", self.vertex_diameter)
+        hint_row = QHBoxLayout()
+        self.polygon_close_hint = QCheckBox("靠近首点时放大")
+        self.polygon_close_hint.setChecked(window.scene.polygon_close_hint_enabled)
+        self.polygon_close_scale = QDoubleSpinBox()
+        self.polygon_close_scale.setRange(MIN_CLOSE_HINT_SCALE, MAX_CLOSE_HINT_SCALE)
+        self.polygon_close_scale.setSingleStep(0.1)
+        self.polygon_close_scale.setDecimals(1)
+        self.polygon_close_scale.setSuffix(" 倍")
+        self.polygon_close_scale.setValue(window.scene.polygon_close_hint_scale)
+        self.polygon_close_scale.setEnabled(self.polygon_close_hint.isChecked())
+        self.polygon_close_hint.toggled.connect(self.polygon_close_scale.setEnabled)
+        tooltip = "仅改变多边形闭合首点的外观；点击闭合的距离及标注坐标保持不变。"
+        self.polygon_close_hint.setToolTip(tooltip)
+        self.polygon_close_scale.setToolTip(tooltip + " 最大为普通顶点直径的 1.5 倍。")
+        hint_row.addWidget(self.polygon_close_hint)
+        hint_row.addWidget(self.polygon_close_scale)
+        form.addRow("多边形闭合提示", hint_row)
         self.canvas_attributes = QCheckBox("在画布标签中显示已填写属性（◇ 公共 / ◆ 类别）")
         self.canvas_attributes.setChecked(window.scene.show_canvas_attributes)
         self.canvas_attributes.setToolTip("类别始终显示；属性过多时画布显示摘要，悬停可查看完整值")

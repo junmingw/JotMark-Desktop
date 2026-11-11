@@ -17,13 +17,13 @@ import shutil
 import tempfile
 
 from jotmark.data.attribute_schema import new_attribute_node
+from jotmark.data.project_config import BACKUP_ROOT, EXPLICIT_CLASS_LIST_FILE
 
 
 CLASS_FILE = "classes.txt"
 SCHEMA_FILE = "class_attributes.json"
 REPORT_FILE = "category_conversion_report.json"
-BACKUP_ROOT = ".jotmark_backups"
-EXCLUDED_JSON = {SCHEMA_FILE, "class_colors.json"}
+EXCLUDED_JSON = {SCHEMA_FILE, "class_colors.json", EXPLICIT_CLASS_LIST_FILE}
 
 
 class ConversionError(ValueError):
@@ -209,7 +209,7 @@ def _backup_source(source: Path) -> Path:
     partial backup is not enough to safely roll that back, especially when a
     project keeps images, templates, or auxiliary exports below the same
     directory.  Snapshot the whole source tree, while deliberately excluding
-    the backup root itself so earlier snapshots never recurse into a new one.
+    existing backup folders so earlier snapshots never recurse into a new one.
     """
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = source / BACKUP_ROOT / f"category-conversion-{timestamp}"
@@ -223,7 +223,7 @@ def _backup_source(source: Path) -> Path:
     shutil.copytree(
         source,
         backup,
-        ignore=shutil.ignore_patterns(BACKUP_ROOT),
+        ignore=shutil.ignore_patterns(BACKUP_ROOT, ".jotmark_backups", "JotMark备份_*"),
         copy_function=shutil.copy2,
     )
     return backup
@@ -279,7 +279,7 @@ def _copy_source_to_staging(source: Path, staging: Path):
         source,
         staging,
         dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns(BACKUP_ROOT),
+        ignore=shutil.ignore_patterns(BACKUP_ROOT, ".jotmark_backups", "JotMark备份_*"),
         copy_function=shutil.copy2,
     )
 

@@ -90,6 +90,78 @@ class GraphicsItemLifecycleTests(unittest.TestCase):
             gc.collect()
         self.assertEqual(len(scene.items()), 0)
 
+    def test_handles_are_retired_after_current_event_and_can_be_recreated(self):
+        from PySide6.QtWidgets import QGraphicsScene
+        from shiboken6 import isValid
+        from jotmark.graphics.shapes import PolyShape, PolylineShape, RectShape, RotatedRectShape
+
+        scene = QGraphicsScene()
+        scene.setSceneRect(0, 0, 500, 500)
+        for shape in self._shapes():
+            if not isinstance(shape, (PolyShape, PolylineShape, RectShape, RotatedRectShape)):
+                continue
+            with self.subTest(shape=type(shape).__name__):
+                scene.addItem(shape)
+                shape.setSelected(True)
+                if isinstance(shape, RectShape):
+                    old = shape.lt_handle
+                elif isinstance(shape, RotatedRectShape):
+                    old = shape.h_top
+                else:
+                    old = shape.handles[-1]
+                shape.setSelected(False)
+                self.assertTrue(isValid(old))
+                self.assertIs(old.parentItem(), shape)
+                self.assertFalse(old.isVisible())
+                shape.setSelected(True)
+                self.app.processEvents()
+                self.assertTrue(isValid(old))  # this test holds a Python reference
+                self.assertIsNone(old.scene())
+                self.assertIsNone(old.parentItem())
+                shape.setSelected(False)
+                scene.removeItem(shape)
+                self.app.processEvents()
+
+    def test_vertex_removed_during_callback_remains_alive_until_next_turn(self):
+        from PySide6.QtWidgets import QGraphicsScene
+        from shiboken6 import isValid
+        from jotmark.graphics.shapes import PolyShape, PolylineShape
+
+        scene = QGraphicsScene()
+        for shape in self._shapes():
+            if not isinstance(shape, (PolyShape, PolylineShape)):
+                continue
+            with self.subTest(shape=type(shape).__name__):
+                scene.addItem(shape)
+                shape.setSelected(True)
+                if isinstance(shape, PolyShape):
+                    points = shape.polygon()
+                    points.append(points[0])
+                    shape.setPolygon(points)
+                handle = shape.handles[-1]
+                shape.remove_handle(handle)
+                self.assertTrue(isValid(handle))
+                self.assertIs(handle.parentItem(), shape)
+                self.assertFalse(handle.isVisible())
+                self.app.processEvents()
+                self.assertIsNone(handle.parentItem())
+                self.assertIsNone(handle.scene())
+                scene.removeItem(shape)
+                self.app.processEvents()
+
+    def test_retired_handle_survives_parent_or_scene_disposal(self):
+        from PySide6.QtWidgets import QGraphicsScene
+        from shiboken6 import delete
+        from jotmark.graphics.shapes import PolyShape
+
+        scene = QGraphicsScene()
+        shape = next(shape for shape in self._shapes() if isinstance(shape, PolyShape))
+        scene.addItem(shape)
+        shape.setSelected(True)
+        shape.setSelected(False)
+        delete(scene)
+        self.app.processEvents()  # a deferred callback must tolerate Qt-owned destruction
+
 
 if __name__ == "__main__":
     unittest.main()

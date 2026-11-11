@@ -1,9 +1,29 @@
 # -*- coding: utf-8 -*-
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem
+from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, QGraphicsEllipseItem
 from PySide6.QtGui import QPixmap, QPolygonF, QPen, QColor, QBrush, QPainterPath, QImageReader, QTransform
 from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QTimer, QSize
-from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, HandleItem, PoseShape
+import math
+from shiboken6 import isValid
+from jotmark.graphics.shapes import (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape,
+                                     HandleItem, PoseShape, DEFAULT_VERTEX_DIAMETER,
+                                     normalize_vertex_diameter, vertex_pen_width)
 from jotmark.graphics.geometry import fit_obb_to_bounds
+
+
+POLYGON_CLOSE_DISTANCE = 10.0  # image pixels, matching the existing click behavior
+DEFAULT_CLOSE_HINT_SCALE = 1.4
+MIN_CLOSE_HINT_SCALE = 1.0
+MAX_CLOSE_HINT_SCALE = 1.5
+
+
+def normalize_close_hint_scale(value):
+    try:
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("non-finite scale")
+    except (TypeError, ValueError):
+        value = DEFAULT_CLOSE_HINT_SCALE
+    return round(max(MIN_CLOSE_HINT_SCALE, min(MAX_CLOSE_HINT_SCALE, value)), 1)
 
 
 class CanvasMode:
@@ -64,6 +84,9 @@ class Canvas(QGraphicsScene):
         super().__init__(parent)
         self.mode = CanvasMode.RECT
         self.annotation_line_width = 2
+        self.vertex_handle_diameter = DEFAULT_VERTEX_DIAMETER
+        self.polygon_close_hint_enabled = True
+        self.polygon_close_hint_scale = DEFAULT_CLOSE_HINT_SCALE
         self.show_canvas_attributes = True
         self.transparent_label_background = False
         self.edge_click_margin = 40  # screen pixels; 0 disables off-image vertex placement
@@ -80,6 +103,8 @@ class Canvas(QGraphicsScene):
         self.start_pt = None
         self.temp_item = None
         self.poly_pts = []
+        self._drawing_vertex_markers = []
+        self._drawing_pointer = None
         self.merge_selection_mode = False
 
         # 智能悬停提示图层
@@ -105,6 +130,8 @@ class Canvas(QGraphicsScene):
 
     def addItem(self, item):
         super().addItem(item)
+        if isinstance(item, (PolyShape, PolylineShape)):
+            item.set_vertex_handle_diameter(self.vertex_handle_diameter)
         label = getattr(item, "label_text", None)
         if label is not None:
             label.set_background_transparent(self.transparent_label_background)
@@ -132,6 +159,56 @@ class Canvas(QGraphicsScene):
             pen.setWidthF(self.annotation_line_width)
             self.temp_item.rect_item.setPen(pen)
 
+    def set_vertex_handle_diameter(self, diameter):
+        """Update visible, future, and in-progress polygon/line vertices."""
+        self.vertex_handle_diameter = normalize_vertex_diameter(diameter)
+        for item in self.items():
+            if isinstance(item, (PolyShape, PolylineShape)):
+                item.set_vertex_handle_diameter(self.vertex_handle_diameter)
+        self._sync_drawing_vertex_markers()
+
+    def set_polygon_close_hint(self, enabled, scale):
+        """Configure the visual hint without changing closure hit testing."""
+        self.polygon_close_hint_enabled = bool(enabled)
+        self.polygon_close_hint_scale = normalize_close_hint_scale(scale)
+        self._sync_drawing_vertex_markers()
+
+    def _near_polygon_start(self, point):
+        if point is None or self.mode != CanvasMode.POLY or len(self.poly_pts) < 3:
+            return False
+        delta = point - self.poly_pts[0]
+        return delta.x() ** 2 + delta.y() ** 2 < POLYGON_CLOSE_DISTANCE ** 2
+
+    def clear_drawing_pointer(self):
+        """Remove a stale visual cue after the pointer leaves or the view moves."""
+        if self._drawing_pointer is not None:
+            self._drawing_pointer = None
+            self._sync_drawing_vertex_markers()
+
+    def _sync_drawing_vertex_markers(self):
+        while len(self._drawing_vertex_markers) > len(self.poly_pts):
+            self.removeItem(self._drawing_vertex_markers.pop())
+        while len(self._drawing_vertex_markers) < len(self.poly_pts):
+            marker = QGraphicsEllipseItem()
+            marker.setAcceptedMouseButtons(Qt.NoButton)
+            marker.setZValue(1000)
+            marker.setBrush(QBrush(QColor(255, 255, 255)))
+            self.addItem(marker)
+            self._drawing_vertex_markers.append(marker)
+        model_key = getattr(self.sam_client, 'current_model_key', None) or ''
+        manual_polygon = not (self.sam_enabled and model_key.startswith('sam'))
+        highlight = (self.polygon_close_hint_enabled and manual_polygon
+                     and self._near_polygon_start(self._drawing_pointer))
+        for index, (marker, point) in enumerate(zip(self._drawing_vertex_markers, self.poly_pts)):
+            is_start = highlight and index == 0
+            diameter = self.vertex_handle_diameter * (self.polygon_close_hint_scale if is_start else 1.0)
+            pen = QPen(QColor(153, 74, 0) if is_start else QColor(28, 126, 214))
+            pen.setWidthF(vertex_pen_width(diameter))
+            marker.setRect(-diameter / 2, -diameter / 2, diameter, diameter)
+            marker.setPen(pen)
+            marker.setBrush(QBrush(QColor(255, 196, 70) if is_start else QColor(255, 255, 255)))
+            marker.setPos(point)
+
     def reposition_annotation_labels(self):
         """Keep fixed-screen-size labels next to their geometry after zoom."""
         for item in self.items():
@@ -139,6 +216,8 @@ class Canvas(QGraphicsScene):
                 item.update_label_position(item)
 
     def load_image(self, path):
+        # Image changes invalidate an unfinished path's coordinate system.
+        self.cancel_drawing()
         self.clear_shapes()
         reader = QImageReader(path)
         reader.setAutoTransform(True)
@@ -184,8 +263,11 @@ class Canvas(QGraphicsScene):
         return QRectF(0, 0, self._image_size.width(), self._image_size.height())
 
     def clear_shapes(self):
-        # Clear all shape items from the canvas
+        # Preserve an unfinished manual drawing during same-image refreshes
+        # (e.g. background model results or a format change).
         for item in self.items():
+            if item is self.temp_item:
+                continue
             if isinstance(item, (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)):
                 if getattr(item, 'is_temp', False):
                     if hasattr(self, 'pose_preview_item') and item == getattr(self, 'pose_preview_item', None):
@@ -202,6 +284,8 @@ class Canvas(QGraphicsScene):
 
     def set_sam_enabled(self, enabled):
         self.sam_enabled = enabled
+        if self._drawing_vertex_markers:
+            self._sync_drawing_vertex_markers()
         if not enabled:
             self._sam_hover_timer.stop()
             self._sam_hover_pending_point = None
@@ -217,6 +301,29 @@ class Canvas(QGraphicsScene):
                 return
         self._sam_hover_pending_point = QPointF(point)
         self._sam_hover_timer.start()
+
+    def suspend_hover_for_pan(self):
+        """Do not start a queued AI preview for a location being panned away."""
+        self._sam_hover_timer.stop()
+        self._sam_hover_pending_point = None
+        self._last_sam_hover_point = None
+        self.clear_drawing_pointer()
+        if self.sam_hover_item:
+            self.removeItem(self.sam_hover_item)
+            self.sam_hover_item = None
+
+    def refresh_pointer_after_pan(self, point):
+        """Realign the crosshair and draft preview without starting inference."""
+        if not self.img_item:
+            return
+        self.update_crosshair(point)
+        if self.mode in (CanvasMode.POLY, CanvasMode.LINE) and self.poly_pts:
+            model_key = getattr(self.sam_client, 'current_model_key', None) or ''
+            if not (self.mode == CanvasMode.POLY and self.sam_enabled and model_key.startswith('sam')):
+                vertex = self.projected_edge_vertex(point)
+                if vertex is None and self.is_inside_image(point):
+                    vertex = self.clamp_point(point)
+                self.update_temp_poly(mouse_pos=vertex)
 
     def _submit_sam_hover_inference(self):
         point = self._sam_hover_pending_point
@@ -363,12 +470,16 @@ class Canvas(QGraphicsScene):
 
         elif self.mode in (CanvasMode.POLY, CanvasMode.LINE) and not (self.mode == CanvasMode.POLY and self.sam_enabled and is_sam_model) and len(self.poly_pts) > 0:
             vertex = self.projected_edge_vertex(pt)
+            if vertex is None and self.is_inside_image(pt):
+                vertex = self.clamp_point(pt)
             self.update_temp_poly(mouse_pos=vertex if vertex is not None else None)
 
     def handle_sam_result(self, poly_pts, rect_xywh, rect_obb, score, is_click):
         """处理来自 SAM 后台的推理结果，正确区分矩形、多边形 and 旋转框"""
         # 支持 RBOX
         if not self.sam_enabled or self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]:
+            return
+        if not is_click and any(getattr(view, '_is_panning', False) for view in self.views()):
             return
 
         if self.sam_hover_item:
@@ -593,13 +704,10 @@ class Canvas(QGraphicsScene):
                     self.shape_drawn.emit(shape)
             elif self.mode == CanvasMode.POLY:
                 vertex = edge_vertex if edge_vertex is not None else clamped_pt
-                if len(self.poly_pts) > 2:
-                    dist = ((vertex.x() - self.poly_pts[0].x()) ** 2 + (
-                            vertex.y() - self.poly_pts[0].y()) ** 2) ** 0.5
-                    if dist < 10:
-                        self.finish_poly_shape()
-                        event.accept()
-                        return
+                if self._near_polygon_start(vertex):
+                    self.finish_poly_shape()
+                    event.accept()
+                    return
                 self.poly_pts.append(vertex)
                 self.update_temp_poly()
                 event.accept()
@@ -626,9 +734,11 @@ class Canvas(QGraphicsScene):
                            if isinstance(item, BaseShape) and not getattr(item, 'is_temp', False)]
 
         # 阻止场景信号，防止 super() 中的 toggle 取消触发 selectionChanged 连锁反应
-        self.blockSignals(True)
-        super().mouseReleaseEvent(event)
-        self.blockSignals(False)
+        previous_blocked = self.blockSignals(True)
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            self.blockSignals(previous_blocked)
 
         # 如果 super() 把我们选中的图形取消了，立即恢复
         if selected_before:
@@ -636,7 +746,7 @@ class Canvas(QGraphicsScene):
                               if isinstance(item, BaseShape) and not getattr(item, 'is_temp', False)]
             if not selected_after:
                 for item in selected_before:
-                    if item.scene() == self:
+                    if isValid(item) and item.scene() == self:
                         item.setSelected(True)
 
         current_model_key = getattr(self.sam_client, 'current_model_key', None) or ''
@@ -727,6 +837,8 @@ class Canvas(QGraphicsScene):
             super().mouseDoubleClickEvent(event)
 
     def update_temp_poly(self, mouse_pos=None):
+        self._drawing_pointer = QPointF(mouse_pos) if mouse_pos is not None else None
+        self._sync_drawing_vertex_markers()
         display_pts = self.poly_pts.copy()
         if mouse_pos is not None: display_pts.append(mouse_pos)
         if len(display_pts) < 2:
@@ -745,6 +857,8 @@ class Canvas(QGraphicsScene):
         shape_class = PolyShape if self.mode == CanvasMode.POLY else PolylineShape
         shape = shape_class(QPolygonF(self.poly_pts))
         self.poly_pts.clear()
+        self._drawing_pointer = None
+        self._sync_drawing_vertex_markers()
         if self.temp_item:
             self.removeItem(self.temp_item)
             self.temp_item = None
@@ -753,6 +867,8 @@ class Canvas(QGraphicsScene):
     def cancel_drawing(self):
         self.drawing = False
         self.poly_pts.clear()
+        self._drawing_pointer = None
+        self._sync_drawing_vertex_markers()
         if self.temp_item:
             self.removeItem(self.temp_item)
             self.temp_item = None

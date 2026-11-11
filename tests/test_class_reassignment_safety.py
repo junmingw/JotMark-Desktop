@@ -273,7 +273,7 @@ class ClassReassignmentSafetyTests(unittest.TestCase):
         self.assertEqual(saved["attributes"]["review"], False)
         self.assertEqual(saved["attributes"]["global_child"], "y")
         self.assertNotIn("kind", saved["attributes"])
-        backup = os.path.join(self.temp.name, ".jotmark_backups", "annotation-history", "road.json.previous")
+        backup = os.path.join(self.temp.name, "JotMark备份", "annotation-history", "road.json.previous")
         with open(backup, encoding="utf-8") as stream:
             self.assertEqual(json.load(stream)["shapes"][0]["attributes"], before)
         self.win.undo()

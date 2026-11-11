@@ -19,6 +19,22 @@ ATTRIBUTE_SCHEMA_FILE = "class_attributes.json"
 ATTRIBUTE_TYPES = {"single_select", "multi_select", "text", "number", "boolean"}
 
 
+def read_attribute_json(path):
+    """Read a JSON schema from common Windows and cross-platform encodings."""
+    with open(path, "rb") as stream:
+        content = stream.read()
+    if content.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        text = content.decode("utf-32")
+    elif content.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = content.decode("utf-16")
+    else:
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("gb18030")
+    return json.loads(text, parse_constant=_reject_json_constant)
+
+
 def _reject_json_constant(value):
     raise ValueError(f"属性文件包含无效数值：{value}")
 
@@ -89,8 +105,7 @@ class ClassAttributeStore:
             self._fingerprint_known = True
             if self._disk_fingerprint is None:
                 return
-            with open(path, "r", encoding="utf-8") as stream:
-                raw = json.load(stream, parse_constant=_reject_json_constant)
+            raw = read_attribute_json(path)
             if file_fingerprint(path) != self._disk_fingerprint:
                 raise ValueError("读取期间属性文件发生变化")
             if not isinstance(raw, dict) or not isinstance(raw.get("global", []), list) or not isinstance(raw.get("classes", {}), dict):
@@ -164,6 +179,47 @@ class ClassAttributeStore:
             "global_count": len(self._global),
             "class_count": len(self._classes),
         }
+
+    def matches_import(self, raw) -> bool:
+        """Compare effective definitions without generating new IDs for omitted IDs.
+
+        Explicit IDs, extra metadata, nesting, option order and class names all
+        remain significant. Missing IDs may reuse the existing positional ID,
+        because retaining it protects already-saved annotation values.
+        """
+        if self.load_error:
+            return False
+        incoming = deepcopy(raw)
+
+        def reuse_missing_ids(nodes, existing):
+            if not isinstance(nodes, list):
+                return
+            for index, node in enumerate(nodes):
+                if not isinstance(node, dict):
+                    continue
+                old = existing[index] if index < len(existing) else {}
+                if not node.get("id") and old.get("id"):
+                    node["id"] = old["id"]
+                reuse_missing_ids(node.get("children", []), old.get("children", []))
+
+        reuse_missing_ids(incoming.get("global", []), self._global)
+        for name, nodes in incoming.get("classes", {}).items():
+            reuse_missing_ids(nodes, self._classes.get(str(name).strip(), []))
+        candidate = ClassAttributeStore()
+        candidate.replace_schema(incoming)
+
+        def document(store):
+            metadata = deepcopy(store._document_metadata)
+            metadata.setdefault("version", 2)
+            metadata.update({"global": store._global, "classes": store._classes})
+            return metadata
+
+        # Python considers True == 1 and 1 == 1.0; JSON metadata can attach
+        # meaning to these distinct types, so compare canonical JSON instead.
+        def canonical(value):
+            return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+        return canonical(document(candidate)) == canonical(document(self))
 
     def save(self):
         path = self.path

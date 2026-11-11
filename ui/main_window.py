@@ -286,6 +286,9 @@ class CanvasView(QGraphicsView):
 
         self._is_panning = False
         self._pan_start_pos = None
+        self._pan_button = Qt.NoButton
+        self._pan_range_ready = False
+        self._pan_scene_left_active = False
         self._user_zoomed = False
         self._fit_scale = 1.0
         # Re-anchor clamped labels as the viewport pans.  Coalesce scroll
@@ -294,8 +297,14 @@ class CanvasView(QGraphicsView):
         self._label_reposition_timer.setSingleShot(True)
         self._label_reposition_timer.setInterval(0)
         self._label_reposition_timer.timeout.connect(self._reposition_labels)
-        self.horizontalScrollBar().valueChanged.connect(lambda _value: self._label_reposition_timer.start())
-        self.verticalScrollBar().valueChanged.connect(lambda _value: self._label_reposition_timer.start())
+        self.horizontalScrollBar().valueChanged.connect(self._on_scroll_position_changed)
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll_position_changed)
+
+    def _on_scroll_position_changed(self, _value):
+        self._label_reposition_timer.start()
+        scene = self.scene()
+        if scene and hasattr(scene, 'clear_drawing_pointer'):
+            scene.clear_drawing_pointer()
 
     def _reposition_labels(self):
         scene = self.scene()
@@ -335,6 +344,7 @@ class CanvasView(QGraphicsView):
         self._user_zoomed = True
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         scene.reposition_annotation_labels()
+        scene.clear_drawing_pointer()
 
     def reset_to_fit(self):
         """Fit a newly opened image and reset edge-navigation scroll ranges."""
@@ -346,6 +356,7 @@ class CanvasView(QGraphicsView):
         self._user_zoomed = False
         if scene:
             scene.reposition_annotation_labels()
+            scene.clear_drawing_pointer()
 
     def _fit_image_with_edge_band(self):
         """Leave a clickable strip on every side without changing image pixels."""
@@ -384,33 +395,101 @@ class CanvasView(QGraphicsView):
                     self.horizontalScrollBar().value() - event.angleDelta().x()
                 )
             event.accept()
+        scene = self.scene()
+        if scene and hasattr(scene, 'refresh_pointer_after_pan'):
+            scene.refresh_pointer_after_pan(self.mapToScene(event.position().toPoint()))
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton:
+        if self._is_panning:
+            event.accept()
+            return
+        if (event.button() == Qt.MiddleButton or
+                (event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier)):
             self._is_panning = True
             self._pan_start_pos = event.position().toPoint()
-            self.setCursor(Qt.ClosedHandCursor)
+            self._pan_button = event.button()
+            self._pan_range_ready = False
+            scene = self.scene()
+            self._pan_scene_left_active = bool(
+                event.button() == Qt.MiddleButton and event.buttons() & Qt.LeftButton
+                and scene and (getattr(scene, 'drawing', False) or scene.mouseGrabberItem())
+            )
+            if scene and hasattr(scene, 'suspend_hover_for_pan'):
+                scene.suspend_hover_for_pan()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
         super().mousePressEvent(event)
 
+    def _prepare_pan_range(self):
+        """Allow panning even at fit-to-window without altering image bounds."""
+        scene = self.scene()
+        scale = self.transform().m11()
+        if not scene or not scene.img_item or scale <= 0:
+            return False
+        center = self.mapToScene(self.viewport().rect().center())
+        image = scene.image_rect()
+        pad_x = self.viewport().width() / scale
+        pad_y = self.viewport().height() / scale
+        desired = image.adjusted(-pad_x, -pad_y, pad_x, pad_y)
+        current = self.sceneRect()
+        if not current.contains(desired):
+            self.setSceneRect(current.united(desired))
+            self.centerOn(center)
+        self._pan_range_ready = True
+        return True
+
     def mouseMoveEvent(self, event):
         if self._is_panning:
-            delta = event.position().toPoint() - self._pan_start_pos
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
-            self._pan_start_pos = event.position().toPoint()
+            self._pan_to(event.position().toPoint())
             event.accept()
             return
         super().mouseMoveEvent(event)
 
+    def _pan_to(self, position):
+        delta = position - self._pan_start_pos
+        if not delta.isNull() and (self._pan_range_ready or self._prepare_pan_range()):
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self._user_zoomed = True
+        self._pan_start_pos = position
+
+    def _end_pan(self):
+        self._is_panning = False
+        self._pan_start_pos = None
+        self._pan_button = Qt.NoButton
+        self._pan_range_ready = False
+        self._pan_scene_left_active = False
+        self.viewport().setCursor(Qt.CrossCursor)
+
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MiddleButton:
-            self._is_panning = False
-            self.viewport().setCursor(Qt.CrossCursor)
+        if self._is_panning:
+            if event.button() == self._pan_button:
+                # The final release may arrive without a preceding move event.
+                self._pan_to(event.position().toPoint())
+                self._end_pan()
+                scene = self.scene()
+                if scene and hasattr(scene, 'refresh_pointer_after_pan'):
+                    scene.refresh_pointer_after_pan(self.mapToScene(event.position().toPoint()))
+            elif event.button() == Qt.LeftButton and self._pan_scene_left_active:
+                # An existing rectangle/vertex drag can finish while the
+                # middle button is held; do not leave the scene stuck drawing.
+                self._pan_scene_left_active = False
+                super().mouseReleaseEvent(event)
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self._is_panning or (event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier):
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def focusOutEvent(self, event):
+        if self._is_panning:
+            self._end_pan()
+        super().focusOutEvent(event)
 
     def leaveEvent(self, event):
         """鼠标离开画布时隐藏十字虚线"""
@@ -418,6 +497,7 @@ class CanvasView(QGraphicsView):
         if scene and hasattr(scene, 'h_line'):
             scene.h_line.hide()
             scene.v_line.hide()
+            scene.clear_drawing_pointer()
         super().leaveEvent(event)
 
     def enterEvent(self, event):
@@ -432,6 +512,8 @@ class CanvasView(QGraphicsView):
         """Fit only untouched views; never discard a user's zoom/pan state."""
         super().resizeEvent(event)
         scene = self.scene()
+        if scene and hasattr(scene, 'clear_drawing_pointer'):
+            scene.clear_drawing_pointer()
         if not self._user_zoomed and scene and scene.sceneRect().width() > 0:
             self._fit_image_with_edge_band()
             self._fit_scale = self.transform().m11()
@@ -676,6 +758,11 @@ class Ui_MainWindow(object):
 
         self.view = CanvasView()
         canvasLayout.addWidget(self.view)
+        self.canvasNavigationHint = QLabel("平移：Alt + 左键拖动 / 中键拖动　｜　缩放：Ctrl + 滚轮")
+        self.canvasNavigationHint.setWordWrap(True)
+        self.canvasNavigationHint.setStyleSheet("color: #64748B; padding: 2px 4px;")
+        self.canvasNavigationHint.setToolTip("拖动画布不会移动或新增标注；Linux 若 Alt 拖动窗口被系统占用，请改用中键。")
+        canvasLayout.addWidget(self.canvasNavigationHint)
         
         self.contentSplitter.addWidget(self.canvasArea)
         
@@ -735,22 +822,30 @@ class Ui_MainWindow(object):
         # 文件列表头部布局：紧凑图标 + 计数，完整说明通过悬停提示显示。
         self.filesHeader = QWidget()
         self.filesHeader.setObjectName("filesHeader")
-        filesHeaderLayout = QHBoxLayout(self.filesHeader)
+        filesHeaderLayout = QVBoxLayout(self.filesHeader)
         filesHeaderLayout.setContentsMargins(0, 0, 0, 4)
-        filesHeaderLayout.setSpacing(6)
+        filesHeaderLayout.setSpacing(2)
+        filesSummaryLayout = QHBoxLayout()
+        filesSummaryLayout.setSpacing(6)
+        filesControlsLayout = QHBoxLayout()
+        filesControlsLayout.setSpacing(2)
         
         self.chkSelectAll = QCheckBox()
         self.chkSelectAll.setObjectName("chkSelectAll")
         self.chkSelectAll.setCursor(Qt.PointingHandCursor)
         self.chkSelectAll.setTristate(False)
         self.chkSelectAll.setFixedSize(22, 22)
-        self.chkSelectAll.setToolTip("全选 / 取消全选文件")
+        self.chkSelectAll.setToolTip("勾选或取消勾选所有文件；不会切换当前图片")
 
         self.btnOverwrite = QPushButton()
         self.btnOverwrite.setObjectName("btnOverwrite")
         self.btnOverwrite.setCheckable(True)
         self.btnOverwrite.setCursor(Qt.PointingHandCursor)
-        self.btnOverwrite.setToolTip("覆盖已有标注")
+        self.btnOverwrite.setToolTip(
+            "模型预测/提示词提取覆盖模式：开启后用新结果替换旧标注，"
+            "无预测结果也可能清空旧标注。关闭时尽量保留并追加；"
+            "普通手工标注和保存不受此按钮影响。操作前请备份。"
+        )
         self.btnOverwrite.setFixedSize(22, 22)
 
         self.btnDeleteFiles = QPushButton()
@@ -758,7 +853,7 @@ class Ui_MainWindow(object):
         self.btnDeleteFiles.setCursor(Qt.PointingHandCursor)
         self.btnDeleteFiles.setIcon(QIcon("ui/icon/trash.svg"))
         self.btnDeleteFiles.setIconSize(QSize(13, 13))
-        self.btnDeleteFiles.setToolTip("批量删除选中的图片")
+        self.btnDeleteFiles.setToolTip("将勾选的图片及其标注批量移至回收站（操作前确认）")
         self.btnDeleteFiles.setFixedSize(22, 22)
         self.btnDeleteFiles.setStyleSheet("""
             QPushButton {
@@ -799,16 +894,24 @@ class Ui_MainWindow(object):
         self.labelAnnotatedCount = QLabel("(已标注 0/0)")
         self.labelAnnotatedCount.setObjectName("labelAnnotatedCount")
         self.labelAnnotatedCount.setStyleSheet("color: #16A34A; font-size: 11px;")
-        
-        filesHeaderLayout.addWidget(self.labelFiles)
-        filesHeaderLayout.addWidget(self.labelSelectedCount)
-        filesHeaderLayout.addWidget(self.labelAnnotatedCount)
-        filesHeaderLayout.addStretch()
-        filesHeaderLayout.addWidget(self.chkSelectAll)
-        filesHeaderLayout.addWidget(self.btnOverwrite)
-        filesHeaderLayout.addWidget(self.btnFileExtensions)
-        filesHeaderLayout.addWidget(self.btnFileSort)
-        filesHeaderLayout.addWidget(self.btnDeleteFiles)
+
+        self.labelCurrentImagePosition = QLabel("—/0")
+        self.labelCurrentImagePosition.setObjectName("labelCurrentImagePosition")
+        self.labelCurrentImagePosition.setStyleSheet("color: #64748B; font-size: 10px;")
+        self.labelCurrentImagePosition.setToolTip("当前图片在文件列表排序中的位置，与勾选数量无关")
+
+        filesSummaryLayout.addWidget(self.labelFiles)
+        filesSummaryLayout.addWidget(self.labelSelectedCount)
+        filesSummaryLayout.addWidget(self.labelAnnotatedCount)
+        filesSummaryLayout.addStretch()
+        filesControlsLayout.addWidget(self.labelCurrentImagePosition)
+        filesControlsLayout.addStretch()
+        filesControlsLayout.addWidget(self.chkSelectAll)
+        filesControlsLayout.addWidget(self.btnOverwrite)
+        filesControlsLayout.addWidget(self.btnFileExtensions)
+        filesControlsLayout.addWidget(self.btnFileSort)
+        filesHeaderLayout.addLayout(filesSummaryLayout)
+        filesHeaderLayout.addLayout(filesControlsLayout)
         
         self.listFiles = QListWidget()
         self.listFiles.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -834,6 +937,8 @@ class Ui_MainWindow(object):
 
         filePagerLayout.addWidget(self.btnPreviousImage)
         filePagerLayout.addWidget(self.btnNextImage)
+        filePagerLayout.addStretch()
+        filePagerLayout.addWidget(self.btnDeleteFiles)
         
         filesLayout.addWidget(self.filesHeader)
         filesLayout.addWidget(self.listFiles)

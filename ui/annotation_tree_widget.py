@@ -384,6 +384,10 @@ class AnnotationTreeWidget(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self._class_list = []
+        # Explicitly imported class lists remain authoritative. Existing
+        # annotations with other labels still need visible, temporary rows.
+        self.retain_unlisted_annotations = False
+        self._unlisted_labels = []
         self._class_colors = {}
         self._color_index = 0
         self._current_dir = None
@@ -1018,6 +1022,8 @@ class AnnotationTreeWidget(QWidget):
         if cls_name in self._class_list:
             return
         self._class_list.append(cls_name)
+        if cls_name in self._unlisted_labels:
+            self._unlisted_labels.remove(cls_name)
 
         # Allocate color
         from ui.class_list_widget import get_palette_color
@@ -1045,6 +1051,7 @@ class AnnotationTreeWidget(QWidget):
 
     def clear_classes(self):
         self._class_list.clear()
+        self._unlisted_labels.clear()
         self.preferred_class = None
         self._class_colors.clear()
         self._color_index = 0
@@ -1127,7 +1134,7 @@ class AnnotationTreeWidget(QWidget):
 
     def _sync_annotation_rows(self, grouped_shapes):
         """Synchronize child annotation rows while never moving custom rows."""
-        for class_name in self._class_list:
+        for class_name in self._class_list + self._unlisted_labels:
             parent = self._class_items.get(class_name)
             if parent is None:
                 continue
@@ -1159,14 +1166,17 @@ class AnnotationTreeWidget(QWidget):
 
         # New labels normally arrive through MainWindow.  Keep external scene
         # changes safe by creating their category before any row is rendered.
-        missing_labels = [
-            class_name for class_name in grouped_shapes
-            if class_name not in self._class_items
-        ]
-        if missing_labels:
+        if self.retain_unlisted_annotations:
+            unlisted = [name for name in grouped_shapes if name not in self._class_list]
+            rebuild = unlisted != self._unlisted_labels
+            self._unlisted_labels = unlisted
+        else:
+            missing_labels = [name for name in grouped_shapes if name not in self._class_items]
+            rebuild = bool(missing_labels)
             for class_name in missing_labels:
                 if class_name not in self._class_list:
                     self._class_list.append(class_name)
+        if rebuild:
             self.refresh_tree_items()
             grouped_shapes = self._group_shapes_by_class(self._last_shapes)
 
@@ -1213,7 +1223,7 @@ class AnnotationTreeWidget(QWidget):
             self._class_items.clear()
             self._shape_items.clear()
 
-            for class_name in self._class_list:
+            for class_name in self._class_list + self._unlisted_labels:
                 shapes_in_class = grouped_shapes.get(class_name, [])
                 parent = QTreeWidgetItem(self.treeWidget)
                 parent.setData(0, Qt.UserRole, class_name)
@@ -1227,6 +1237,8 @@ class AnnotationTreeWidget(QWidget):
                     count=len(shapes_in_class),
                     parent_tree=self,
                 )
+                if class_name in self._unlisted_labels:
+                    parent_widget.setToolTip("历史标注类别，未列入当前类别文件；标注原有类别名称未更改。")
                 self.treeWidget.setItemWidget(parent, 0, parent_widget)
 
             self._sync_annotation_rows(grouped_shapes)

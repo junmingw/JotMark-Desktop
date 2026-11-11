@@ -37,6 +37,7 @@ from jotmark.data.category_conversion import (
     load_project_metadata,
     safe_category_suffix,
 )
+from jotmark.data.project_config import BACKUP_ROOT
 
 
 MODE_CATEGORY_TO_CATEGORY = "类别 → 类别"
@@ -403,7 +404,7 @@ class CategoryConversionDialog(QDialog):
         self.output_preview.setText(str(output) if output else "请先选择输出父目录并填写新文件夹名")
         if source_text:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.backup_preview.setText(str(Path(source_text).expanduser() / ".jotmark_backups" / f"category-conversion-{stamp}"))
+            self.backup_preview.setText(str(Path(source_text).expanduser() / BACKUP_ROOT / f"category-conversion-{stamp}"))
         else:
             self.backup_preview.setText("—")
 

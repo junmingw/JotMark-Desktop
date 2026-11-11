@@ -2,9 +2,62 @@ from PySide6.QtWidgets import QGraphicsItem, QGraphicsPolygonItem, QGraphicsRect
     QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsObject, QGraphicsDropShadowEffect, QMenu
 from PySide6.QtGui import QPen, QBrush, QColor, QPolygonF, QFont, QFontMetrics, QTransform, QPainter, QAction, QPainterPath, QPainterPathStroker
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer
+from shiboken6 import isValid
 from html import escape
 import math
+import sys
+import traceback
 from jotmark.graphics.geometry import fit_obb_to_bounds
+
+
+DEFAULT_VERTEX_DIAMETER = 7.0
+MIN_VERTEX_DIAMETER = 2.0
+MAX_VERTEX_DIAMETER = DEFAULT_VERTEX_DIAMETER * 1.5
+
+
+def retire_graphics_handle(handle):
+    """Defer releasing a hidden handle to a subsequent Qt event-loop turn.
+
+    Selection and vertex changes can occur inside a handle's own event
+    callback. Destroying the underlying C++ item there leaves Qt dispatching
+    an event to an invalid object. Hide it immediately, but release it later.
+    The parent may itself be destroyed in the meantime. Nested Qt event loops
+    can still run deferred callbacks before every outer callback has returned.
+    """
+    if not isValid(handle):
+        return
+    handle.hide()
+    handle.setEnabled(False)
+
+    def release():
+        if not isValid(handle):
+            return
+        try:
+            scene = handle.scene()
+            handle.setParentItem(None)
+            if scene is not None and isValid(scene) and handle.scene() is scene:
+                scene.removeItem(handle)
+        except RuntimeError:
+            # A parent or scene may already have been disposed by Qt.
+            traceback.print_exc(file=sys.stderr)
+
+    QTimer.singleShot(0, release)
+
+
+def normalize_vertex_diameter(value):
+    """Keep vertex presentation sizes finite, bounded, and on a half-pixel grid."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_VERTEX_DIAMETER
+    if not math.isfinite(value):
+        return DEFAULT_VERTEX_DIAMETER
+    value = max(MIN_VERTEX_DIAMETER, min(MAX_VERTEX_DIAMETER, value))
+    return round(value * 2) / 2
+
+
+def vertex_pen_width(diameter):
+    return min(1.5, max(0.4, diameter * 1.5 / DEFAULT_VERTEX_DIAMETER))
 
 
 def point_to_segment_dist(p, a, b):
@@ -204,6 +257,20 @@ class BaseShape:
             pen.setWidthF(float(width))
             self.setPen(pen)
 
+    def set_vertex_handle_diameter(self, diameter):
+        """Resize polygon/polyline edit handles without changing geometry."""
+        self._vertex_handle_diameter = normalize_vertex_diameter(diameter)
+        for handle in getattr(self, 'handles', []):
+            if isinstance(handle, HandleItem):
+                handle.set_vertex_diameter(self._vertex_handle_diameter)
+        ghost = getattr(self, 'ghost_handle', None)
+        if ghost is not None:
+            size = self._vertex_handle_diameter
+            ghost.setRect(-size / 2, -size / 2, size, size)
+            pen = ghost.pen()
+            pen.setWidthF(vertex_pen_width(size))
+            ghost.setPen(pen)
+
     def setup_style(self, item):
         self.normal_pen = QPen(QColor(28, 126, 214), self.annotation_pen_width())
         self.normal_brush = QBrush(QColor(28, 126, 214, 50))
@@ -365,9 +432,19 @@ class HandleItem(QGraphicsItem):
         elif self.handle_type == 'v_capsule':
             self.w, self.h = 6, 16
         else:  # 'circle'
-            self.w, self.h = 7, 7
+            size = getattr(parent, '_vertex_handle_diameter', DEFAULT_VERTEX_DIAMETER)
+            self.w, self.h = size, size
             
         self._pen_color = QColor(28, 126, 214)
+
+    def set_vertex_diameter(self, diameter):
+        if self.handle_type != 'circle':
+            return
+        diameter = normalize_vertex_diameter(diameter)
+        if self.w != diameter or self.h != diameter:
+            self.prepareGeometryChange()
+            self.w = self.h = diameter
+            self.update()
 
     def boundingRect(self):
         return QRectF(-self.w / 2, -self.h / 2, self.w, self.h)
@@ -379,7 +456,8 @@ class HandleItem(QGraphicsItem):
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setBrush(QBrush(QColor(255, 255, 255)))
-        painter.setPen(QPen(self._pen_color, 1.5))
+        width = vertex_pen_width(self.w) if self.handle_type == 'circle' else 1.5
+        painter.setPen(QPen(self._pen_color, width))
         
         if self.handle_type == 'circle':
             painter.drawEllipse(self.boundingRect())
@@ -496,15 +574,13 @@ class RectShape(QGraphicsRectItem, BaseShape):
                 self.t_handle, self.b_handle, self.l_handle, self.r_handle]
 
     def _release_handles(self):
-        for handle in self._all_handles():
-            if handle is None:
-                continue
-            scene = handle.scene()
-            handle.setParentItem(None)
-            if scene:
-                scene.removeItem(handle)
+        handles = self._all_handles()
         self.lt_handle = self.rt_handle = self.lb_handle = self.rb_handle = None
         self.t_handle = self.b_handle = self.l_handle = self.r_handle = None
+        for handle in handles:
+            if handle is None:
+                continue
+            retire_graphics_handle(handle)
 
     def hoverEnterEvent(self, event):
         self.apply_hover_enter(self)
@@ -1314,12 +1390,9 @@ class PolyShape(QGraphicsPolygonItem, BaseShape):
             self._release_handles()
 
     def _release_handles(self):
-        for handle in self.handles:
-            scene = handle.scene()
-            handle.setParentItem(None)
-            if scene:
-                scene.removeItem(handle)
-        self.handles.clear()
+        handles, self.handles = self.handles, []
+        for handle in handles:
+            retire_graphics_handle(handle)
 
     def update_handles(self):
         polygon = self.polygon()
@@ -1332,8 +1405,7 @@ class PolyShape(QGraphicsPolygonItem, BaseShape):
 
         while len(self.handles) > polygon.count():
             h = self.handles.pop()
-            h.setParentItem(None)
-            if self.scene(): self.scene().removeItem(h)
+            retire_graphics_handle(h)
 
         self._updating_handles = True
         for i, handle in enumerate(self.handles):
@@ -1538,12 +1610,9 @@ class PolylineShape(QGraphicsPathItem, BaseShape):
             self._release_handles()
 
     def _release_handles(self):
-        for handle in self.handles:
-            scene = handle.scene()
-            handle.setParentItem(None)
-            if scene:
-                scene.removeItem(handle)
-        self.handles.clear()
+        handles, self.handles = self.handles, []
+        for handle in handles:
+            retire_graphics_handle(handle)
 
     def update_handles(self):
         if self.is_temp or not (self.isSelected() or self._hovered):
@@ -1554,9 +1623,7 @@ class PolylineShape(QGraphicsPathItem, BaseShape):
             self.handles.append(handle)
         while len(self.handles) > self._points.count():
             handle = self.handles.pop()
-            handle.setParentItem(None)
-            if self.scene():
-                self.scene().removeItem(handle)
+            retire_graphics_handle(handle)
 
         self._updating_handles = True
         for index, handle in enumerate(self.handles):
@@ -1794,15 +1861,13 @@ class RotatedRectShape(QGraphicsObject, BaseShape):
         self.update_geometry()
 
     def _release_handles(self):
-        for handle in (self.h_top, self.h_bottom, self.h_left, self.h_right, self.h_rotate):
-            if handle is None:
-                continue
-            scene = handle.scene()
-            handle.setParentItem(None)
-            if scene:
-                scene.removeItem(handle)
+        handles = (self.h_top, self.h_bottom, self.h_left, self.h_right, self.h_rotate)
         self.h_top = self.h_bottom = self.h_left = self.h_right = self.h_rotate = None
         self.handles = [self.rotate_line]
+        for handle in handles:
+            if handle is None:
+                continue
+            retire_graphics_handle(handle)
 
     def set_color(self, color):
         """dynamically update OBB color based on class color"""

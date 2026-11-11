@@ -97,6 +97,89 @@ class VertexEditingTests(unittest.TestCase):
                 self.assertAlmostEqual(shape.polygon()[0].y(), 80, delta=1)
                 self.win.scene.removeItem(shape)
 
+    def test_small_and_large_vertex_handles_remain_draggable(self):
+        from PySide6.QtCore import QPointF
+        for diameter in (2, 10.5):
+            for line in (False, True):
+                with self.subTest(diameter=diameter, line=line):
+                    self.win.scene.set_vertex_handle_diameter(diameter)
+                    shape = self._shape(line)
+                    self.assertEqual(shape.handles[0].boundingRect().width(), diameter)
+                    self._drag(shape, 0, QPointF(65, 70), QPointF(80, 80))
+                    self.assertAlmostEqual(shape.polygon()[0].x(), 80, delta=1)
+                    self.assertAlmostEqual(shape.polygon()[0].y(), 80, delta=1)
+                    self.win.scene.removeItem(shape)
+
+    def test_in_progress_vertices_follow_undo_and_redo(self):
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtTest import QTest
+        from jotmark.graphics.canvas import CanvasMode
+        self.win._set_mode(CanvasMode.POLY)
+        viewport = self.win.view.viewport()
+        for point in (QPointF(30, 30), QPointF(100, 30), QPointF(100, 100)):
+            QTest.mouseClick(viewport, Qt.LeftButton, pos=self.win.view.mapFromScene(point))
+        expected = list(self.win.scene.poly_pts)
+        self.assertEqual(len(self.win.scene._drawing_vertex_markers), 3)
+        self.win.undo()
+        self.assertEqual(self.win.scene.poly_pts, expected[:2])
+        self.assertEqual(len(self.win.scene._drawing_vertex_markers), 2)
+        self.win.redo()
+        self.assertEqual(self.win.scene.poly_pts, expected)
+        self.assertEqual(len(self.win.scene._drawing_vertex_markers), 3)
+
+    def test_image_switch_confirms_before_discarding_draft_and_clears_redo(self):
+        from unittest.mock import patch
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QImage
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QMessageBox
+        from jotmark.graphics.canvas import CanvasMode
+        next_image = os.path.join(self.directory.name, "next.png")
+        self.assertTrue(QImage(240, 180, QImage.Format_RGB32).save(next_image))
+        first = self.win._create_file_list_item(self.image)
+        second = self.win._create_file_list_item(next_image)
+        blocked = self.win.listFiles.blockSignals(True)
+        self.win.listFiles.addItem(first)
+        self.win.listFiles.addItem(second)
+        self.win.listFiles.setCurrentItem(first)
+        self.win.listFiles.blockSignals(blocked)
+        self.win._set_mode(CanvasMode.POLY)
+        for point in (QPointF(30, 30), QPointF(100, 30), QPointF(100, 100)):
+            QTest.mouseClick(self.win.view.viewport(), Qt.LeftButton, pos=self.win.view.mapFromScene(point))
+        self.win.undo()
+        before = list(self.win.scene.poly_pts)
+        with patch("main.QMessageBox.question", return_value=QMessageBox.No):
+            self.win.listFiles.setCurrentItem(second)
+        self.assertEqual(self.win.current_image_path, self.image)
+        self.assertEqual(self.win.scene.poly_pts, before)
+        self.assertIs(self.win.listFiles.currentItem(), first)
+        self.assertTrue(self.win._poly_redo_pts)
+        with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
+            self.win.listFiles.setCurrentItem(second)
+        self.assertEqual(self.win.current_image_path, next_image)
+        self.assertFalse(self.win.scene.poly_pts)
+        self.assertFalse(self.win.scene._drawing_vertex_markers)
+        self.assertFalse(self.win._poly_redo_pts)
+
+    def test_cancel_directory_switch_preserves_draft_and_project(self):
+        from unittest.mock import patch
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QMessageBox
+        from jotmark.graphics.canvas import CanvasMode
+        self.win._set_mode(CanvasMode.POLY)
+        QTest.mouseClick(self.win.view.viewport(), Qt.LeftButton,
+                         pos=self.win.view.mapFromScene(QPointF(30, 30)))
+        points = list(self.win.scene.poly_pts)
+        with tempfile.TemporaryDirectory() as target, \
+             patch("main.QFileDialog.getExistingDirectory", return_value=target), \
+             patch("main.QMessageBox.question", return_value=QMessageBox.No):
+            self.win.open_dir()
+        self.assertEqual(self.win.current_dir, self.directory.name)
+        self.assertEqual(self.win.current_image_path, self.image)
+        self.assertEqual(self.win.scene.poly_pts, points)
+        self.assertEqual(len(self.win.scene._drawing_vertex_markers), 1)
+
     def test_release_without_final_move_and_click_do_not_delete_vertex(self):
         from PySide6.QtCore import QPointF, Qt
         from PySide6.QtTest import QTest
@@ -246,6 +329,35 @@ class VertexEditingTests(unittest.TestCase):
                 self.assertEqual(enabled, [False])
                 self.assertEqual(shape.polygon().count(), minimum)
                 self.win.scene.removeItem(shape)
+
+    def test_context_delete_last_vertex_can_continue_editing(self):
+        from PySide6.QtCore import QTimer, Qt
+        from PySide6.QtGui import QContextMenuEvent
+        from PySide6.QtTest import QTest
+
+        for line in (False, True):
+            with self.subTest(line=line):
+                shape = self._shape(line)
+                viewport = self.win.view.viewport()
+                pos = self._point(shape, len(shape.handles) - 1)
+                event = QContextMenuEvent(QContextMenuEvent.Mouse, pos, viewport.mapToGlobal(pos))
+
+                def select_action():
+                    popup = self.app.activePopupWidget()
+                    if popup:
+                        popup.setActiveAction(popup.actions()[0])
+                        QTest.keyClick(popup, Qt.Key_Return)
+
+                QTimer.singleShot(100, select_action)
+                self.app.sendEvent(viewport, event)
+                self.app.processEvents()
+                self.assertEqual(shape.polygon().count(), 3)
+                shape.setSelected(False)
+                shape.setSelected(True)
+                self.app.processEvents()
+                self.assertEqual(len(shape.handles), 3)
+                self.win.scene.removeItem(shape)
+                self.app.processEvents()
 
 
 if __name__ == "__main__":

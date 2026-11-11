@@ -123,6 +123,13 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         dialog = SettingsDialog(win)
         dialog.line_width.setValue(0.5)
         self.assertEqual(dialog.line_width.singleStep(), 0.5)
+        dialog.vertex_diameter.setValue(3.5)
+        self.assertEqual(dialog.vertex_diameter.singleStep(), 0.5)
+        self.assertEqual(dialog.vertex_diameter.maximum(), 10.5)
+        dialog.polygon_close_scale.setValue(1.5)
+        dialog.polygon_close_hint.setChecked(False)
+        self.assertFalse(dialog.polygon_close_scale.isEnabled())
+        self.assertEqual(dialog.polygon_close_scale.maximum(), 1.5)
         dialog.canvas_attributes.setChecked(False)
         dialog.transparent_label_background.setChecked(True)
         dialog.shape_double_click_mode.setCurrentIndex(dialog.shape_double_click_mode.findData("category"))
@@ -136,6 +143,12 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
             win.show_settings_dialog()
         stored = QSettings("luohuabuxiema", "JotMark")
         self.assertEqual(float(stored.value("annotation_line_width")), 0.5)
+        self.assertEqual(float(stored.value("vertex_handle_diameter")), 3.5)
+        self.assertEqual(win.scene.vertex_handle_diameter, 3.5)
+        self.assertFalse(win.scene.polygon_close_hint_enabled)
+        self.assertEqual(win.scene.polygon_close_hint_scale, 1.5)
+        self.assertFalse(stored.value("polygon_close_hint_enabled", type=bool))
+        self.assertEqual(float(stored.value("polygon_close_hint_scale")), 1.5)
         self.assertEqual(stored.value("edge_click_margin", type=int), 70)
         self.assertTrue(win.show_file_extensions)
         self.assertEqual(win.file_sort_key, "size")
@@ -152,6 +165,9 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         another = MainWindow()
         try:
             self.assertEqual(another.scene.annotation_line_width, 0.5)
+            self.assertEqual(another.scene.vertex_handle_diameter, 3.5)
+            self.assertFalse(another.scene.polygon_close_hint_enabled)
+            self.assertEqual(another.scene.polygon_close_hint_scale, 1.5)
             self.assertEqual(another.scene.edge_click_margin, 70)
             self.assertTrue(another.is_dark_theme)
             self.assertFalse(another.scene.show_canvas_attributes)
@@ -167,8 +183,14 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         from ui.settings_dialog import SettingsDialog
         win = self.window
         initial_width = win.scene.annotation_line_width
+        initial_vertex_diameter = win.scene.vertex_handle_diameter
+        initial_close_hint = win.scene.polygon_close_hint_enabled
+        initial_close_scale = win.scene.polygon_close_hint_scale
         dialog = SettingsDialog(win)
         dialog.line_width.setValue(12 if initial_width != 12 else 0.5)
+        dialog.vertex_diameter.setValue(2 if initial_vertex_diameter != 2 else 10.5)
+        dialog.polygon_close_hint.setChecked(not initial_close_hint)
+        dialog.polygon_close_scale.setValue(1.0 if initial_close_scale != 1.0 else 1.5)
         original_margin = win.scene.edge_click_margin
         dialog.edge_click_margin.setValue(0 if original_margin != 0 else 20)
         initial_transparency = win.scene.transparent_label_background
@@ -180,6 +202,9 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         with patch("main.SettingsDialog", return_value=dialog):
             win.show_settings_dialog()
         self.assertEqual(win.scene.annotation_line_width, initial_width)
+        self.assertEqual(win.scene.vertex_handle_diameter, initial_vertex_diameter)
+        self.assertEqual(win.scene.polygon_close_hint_enabled, initial_close_hint)
+        self.assertEqual(win.scene.polygon_close_hint_scale, initial_close_scale)
         self.assertEqual(win.scene.edge_click_margin, original_margin)
         self.assertEqual(win.scene.transparent_label_background, initial_transparency)
         self.assertEqual(win.shape_double_click_mode, initial_double_click_mode)
@@ -228,6 +253,54 @@ class AnnotationDisplaySettingsTests(unittest.TestCase):
         finally:
             invalid_window.close()
             settings.remove("shape_double_click_mode")
+
+    def test_vertex_size_invalid_settings_and_navigation_hint(self):
+        from PySide6.QtCore import QSettings
+        from main import MainWindow
+        settings = QSettings("luohuabuxiema", "JotMark")
+        for value, expected in (("invalid", 7), ("nan", 7), (100, 10.5), (0, 2)):
+            with self.subTest(value=value):
+                settings.setValue("vertex_handle_diameter", value)
+                window = MainWindow()
+                try:
+                    self.assertEqual(window.scene.vertex_handle_diameter, expected)
+                    self.assertIn("Alt", window.canvasNavigationHint.text())
+                    self.assertIn("中键", window.canvasNavigationHint.text())
+                finally:
+                    window.close()
+        settings.remove("vertex_handle_diameter")
+
+    def test_close_hint_invalid_settings_and_defaults(self):
+        from PySide6.QtCore import QSettings
+        from main import MainWindow
+        settings = QSettings("luohuabuxiema", "JotMark")
+        keys = ("polygon_close_hint_enabled", "polygon_close_hint_scale")
+        original = {key: (settings.contains(key), settings.value(key)) for key in keys}
+        try:
+            for value, expected in (("invalid", 1.4), ("nan", 1.4), ("99", 1.5), ("0", 1.0)):
+                with self.subTest(value=value):
+                    settings.setValue("polygon_close_hint_enabled", False)
+                    settings.setValue("polygon_close_hint_scale", value)
+                    window = MainWindow()
+                    try:
+                        self.assertFalse(window.scene.polygon_close_hint_enabled)
+                        self.assertEqual(window.scene.polygon_close_hint_scale, expected)
+                    finally:
+                        window.close()
+            for key in keys:
+                settings.remove(key)
+            window = MainWindow()
+            try:
+                self.assertTrue(window.scene.polygon_close_hint_enabled)
+                self.assertEqual(window.scene.polygon_close_hint_scale, 1.4)
+            finally:
+                window.close()
+        finally:
+            for key, (present, value) in original.items():
+                if present:
+                    settings.setValue(key, value)
+                else:
+                    settings.remove(key)
 
     def test_saved_annotations_reload_with_display_width(self):
         from PySide6.QtGui import QImage

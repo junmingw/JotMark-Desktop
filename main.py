@@ -1,5 +1,7 @@
 import sys
 import os
+import traceback
+import time
 import shutil
 import tempfile
 import re
@@ -7,6 +9,13 @@ import math
 from copy import deepcopy
 from datetime import datetime
 from contextlib import nullcontext
+
+
+if __name__ == "__main__":
+    # Install before loading Qt or model libraries, so native fatal signals
+    # include available Python stacks in the launching terminal.
+    from jotmark.diagnostics import enable_fault_diagnostics
+    enable_fault_diagnostics()
 
 
 # Evaluate this before importing optional AI/training modules.  The manual
@@ -65,7 +74,9 @@ from jotmark.graphics.canvas import Canvas, CanvasMode, get_shape_scene_path
 from jotmark.graphics.geometry import mask_to_annotation_geometry, fit_obb_to_bounds, obb_corners
 from jotmark.data.exporter import Exporter
 from jotmark.data.annotation_safety import archive_annotation, backup_previous_annotation, ensure_unique_image_stem, file_fingerprint
-from jotmark.data.attribute_schema import ATTRIBUTE_SCHEMA_FILE, ClassAttributeStore
+from jotmark.data.attribute_schema import ATTRIBUTE_SCHEMA_FILE, ClassAttributeStore, read_attribute_json
+from jotmark.data.import_diagnostics import classify_import_failure, format_import_failure
+from jotmark.data.project_config import BACKUP_ROOT, EXPLICIT_CLASS_LIST_FILE
 from jotmark.graphics.shapes import RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape
 from jotmark.config.pose_template import TemplateManager
 from utils.message import DialogOver
@@ -113,17 +124,36 @@ def annotation_base_path(image_path, annotation_output_dir=""):
     return os.path.splitext(image_path)[0]
 
 
-def _protect_batch_write(path, expected_fingerprint):
+def _backup_previous_for_project(path, project_dir=None):
+    source_dir = os.path.dirname(os.path.abspath(path))
+    if not project_dir or os.path.normcase(os.path.realpath(source_dir)) == os.path.normcase(os.path.realpath(project_dir)):
+        return backup_previous_annotation(path)
+    return backup_previous_annotation(path, project_dir)
+
+
+def _protect_batch_write(path, expected_fingerprint, project_dir=None):
     """Back up a batch target and reject changes during inference."""
     if file_fingerprint(path) != expected_fingerprint:
         raise RuntimeError(f"批量预测期间标注文件被外部修改：{path}")
-    backup_previous_annotation(path)
+    _backup_previous_for_project(path, project_dir)
     if file_fingerprint(path) != expected_fingerprint:
         raise RuntimeError(f"备份期间标注文件被外部修改：{path}")
 
 
 def _reject_json_constant(value):
     raise ValueError(f"JSON 包含无效数值：{value}")
+
+
+def _retry_windows_sharing(operation, *args):
+    """Retry short-lived Windows sharing/locking violations, not permission errors."""
+    for attempt in range(3):
+        try:
+            return operation(*args)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in (32, 33) or attempt == 2:
+                raise
+            print("文件暂时被占用，正在重试…", file=sys.stderr, flush=True)
+            time.sleep(0.2 * (attempt + 1))
 
 
 def _verify_json_image_identity(document, image_path):
@@ -347,7 +377,7 @@ class SamBatchWorker(QThread):
                     all_shapes.extend(export_shapes)
 
                     if all_shapes:
-                        _protect_batch_write(target_path, expected_fingerprint)
+                        _protect_batch_write(target_path, expected_fingerprint, os.path.dirname(img_path))
                         if self.current_format == "json":
                             out_path = base_name + ".json"
                             Exporter.save_json(out_path, img_path, w_img, h_img, all_shapes, document_metadata)
@@ -363,7 +393,7 @@ class SamBatchWorker(QThread):
                         ext = ANNOTATION_EXTENSION_BY_FORMAT.get(self.current_format)
                         out_path = base_name + ext if ext else None
                         if out_path and os.path.exists(out_path):
-                            _protect_batch_write(out_path, expected_fingerprint)
+                            _protect_batch_write(out_path, expected_fingerprint, os.path.dirname(img_path))
                             archive_annotation(out_path)
 
                 processed += 1
@@ -668,7 +698,7 @@ class YoloBatchPredictorWorker(QThread):
 
                 # 4. 后台增量保存到对应的标注文件中
                 if export_shapes:
-                    _protect_batch_write(target_path, expected_fingerprint)
+                    _protect_batch_write(target_path, expected_fingerprint, os.path.dirname(img_path))
                     if self.current_format == "json":
                         out_path = base_name + ".json"
                         Exporter.save_json(out_path, img_path, w_img, h_img, export_shapes, document_metadata)
@@ -682,7 +712,7 @@ class YoloBatchPredictorWorker(QThread):
                     ext = ANNOTATION_EXTENSION_BY_FORMAT.get(self.current_format)
                     out_path = base_name + ext if ext else None
                     if out_path and os.path.exists(out_path):
-                        _protect_batch_write(out_path, expected_fingerprint)
+                        _protect_batch_write(out_path, expected_fingerprint, os.path.dirname(img_path))
                         archive_annotation(out_path)
 
                 processed += 1
@@ -1165,6 +1195,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.current_image_path = None
         self.current_dir = None
+        self._strict_class_list = False
         self.attribute_store = ClassAttributeStore()
         self.classListWidget.rename_guard = self._can_rename_class
         settings = QSettings("luohuabuxiema", "JotMark")
@@ -1175,6 +1206,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not 0.5 <= line_width <= 12:
             line_width = 2.0
         self.scene.set_annotation_line_width(line_width)
+        self.scene.set_vertex_handle_diameter(settings.value("vertex_handle_diameter", 7.0))
+        close_hint = str(settings.value("polygon_close_hint_enabled", True)).strip().lower() not in {"0", "false", "no", "off"}
+        self.scene.set_polygon_close_hint(close_hint, settings.value("polygon_close_hint_scale", 1.4))
         show_attributes_setting = settings.value("show_canvas_attributes", True)
         self.scene.show_canvas_attributes = str(show_attributes_setting).strip().lower() not in {"0", "false", "no", "off"}
         transparent_setting = settings.value("transparent_label_background", False)
@@ -2007,10 +2041,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         )
         return False
 
-    def _backup_category_operation(self):
+    def _backup_category_operation(self, event="类别或属性变更"):
         """Snapshot category metadata and sidecars before a dataset-wide change."""
         project = self.current_dir or (os.path.dirname(self.current_image_path) if self.current_image_path else "")
         annotations = self.annotation_output_dir or project
+        if self.annotation_output_dir and not os.path.isdir(self.annotation_output_dir):
+            raise FileNotFoundError(f"标注输出目录不存在：{self.annotation_output_dir}")
         roots = []
         for label, directory in (("project", project), ("annotations", annotations)):
             if directory and os.path.isdir(directory):
@@ -2019,9 +2055,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     roots.append((label, absolute))
         if not roots:
             return ""
-        backup_root = os.path.join(roots[0][1], ".jotmark_backups")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_root = os.path.join(roots[0][1], BACKUP_ROOT)
         os.makedirs(backup_root, exist_ok=True)
-        backup = tempfile.mkdtemp(prefix="category-change-", dir=backup_root)
+        backup = tempfile.mkdtemp(prefix=f"{event}_{timestamp}_", dir=backup_root)
         for label, directory in roots:
             destination = os.path.join(backup, label)
             os.makedirs(destination, exist_ok=True)
@@ -2029,8 +2066,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 for entry in entries:
                     if entry.is_file() and entry.name.lower().endswith((".json", ".xml", ".txt")):
                         target = os.path.join(destination, entry.name)
-                        shutil.copy2(entry.path, target)
-                        if file_fingerprint(entry.path) != file_fingerprint(target):
+                        _retry_windows_sharing(shutil.copy2, entry.path, target)
+                        if _retry_windows_sharing(file_fingerprint, entry.path) != _retry_windows_sharing(file_fingerprint, target):
                             raise OSError(f"备份期间文件发生变化：{entry.path}")
         return backup
 
@@ -2056,7 +2093,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self._verify_known_annotation_revision(path)
         if file_fingerprint(path) != read_fingerprint:
             raise RuntimeError(f"读取后标注文件被外部修改：{path}")
-        backup_previous_annotation(path)
+        _backup_previous_for_project(path, self.current_dir or (os.path.dirname(self.current_image_path) if self.current_image_path else None))
         if file_fingerprint(path) != read_fingerprint:
             raise RuntimeError(f"备份期间标注文件被外部修改：{path}")
 
@@ -2064,7 +2101,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self._can_modify_attribute_schema() or not self._ensure_pending_annotation_saved():
             return False
         try:
-            self._last_category_backup = self._backup_category_operation()
+            self._last_category_backup = self._backup_category_operation("类别重命名")
             self.attribute_store.rename_class(_old_name, _new_name)
             try:
                 self.attribute_store.save()
@@ -2311,7 +2348,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self._ensure_pending_annotation_saved():
             return
         try:
-            backup_dir = self._backup_category_operation()
+            backup_dir = self._backup_category_operation("类别删除")
         except Exception as exc:
             QMessageBox.warning(self, "删除已取消", f"自动备份失败，未删除类别：\n{exc}")
             return
@@ -2487,7 +2524,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             points = shape_data.get("points", [])
 
             # 同步类别列表
-            if label and label not in self.class_list:
+            if label and label not in self.class_list and not self._strict_class_list:
                 # self.class_list.append(label)
                 # self.listClasses.addItem(label)
                 self.add_class_to_list(label)
@@ -3116,6 +3153,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             <li><b>精确区域合并</b>：选中两个及以上同类、相连的闭合区域，点击保存按钮右侧的合并图标；程序只计算几何并集，不调用 SAM3 重绘区域</li>
             <li><b>Del / Backspace</b>：删除当前选中的标注框</li>
             <li><b>F1</b>：打开此帮助文档</li>
+            <li><b>Alt + 左键拖动 / 鼠标中键拖动</b>：平移画布；Linux 若 Alt 被窗口管理器占用，可使用中键。</li>
+            <li><b>Ctrl + 滚轮</b>：以鼠标位置为中心缩放画布</li>
         </ul>
         <hr>
         <h3>【多边形绘制技巧】</h3>
@@ -3300,7 +3339,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if is_sam:
                 self.helpLabel.setText("操作: 鼠标悬停实时预览轮廓节点，左键点击直接确认生成多边形")
             else:
-                self.helpLabel.setText("操作: 点击添加顶点，双击闭合多边形")
+                self.helpLabel.setText("操作: 点击添加顶点；靠近首点单击或双击闭合多边形")
         elif mode == CanvasMode.LINE:
             self.helpLabel.setText("操作: 点击添加折线节点，双击 / Enter / 右键结束；选中后可拖动或在线段中间插入节点")
         elif mode == CanvasMode.POINT:
@@ -3309,6 +3348,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.helpLabel.setText("操作: 拖动绘制旋转框，Z/X/C/V调整角度")
 
     def load_classes(self, dir_path):
+        self._strict_class_list = os.path.isfile(os.path.join(dir_path, EXPLICIT_CLASS_LIST_FILE))
+        self.classListWidget.retain_unlisted_annotations = self._strict_class_list
         self.class_list.clear()
         self.classListWidget.load_classes(dir_path)
         self.class_list = self.classListWidget.get_class_list()
@@ -3325,7 +3366,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 )
 
     @staticmethod
-    def _read_class_names(file_path):
+    def _read_class_names(file_path, strict=False):
         """Read a UTF-8 one-category-per-line template; # starts a comment."""
         try:
             with open(file_path, "r", encoding="utf-8-sig") as stream:
@@ -3336,9 +3377,25 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                         names.append(name)
                 return names
         except (OSError, UnicodeError):
+            if strict:
+                raise
             return []
 
-    def _apply_class_names(self, class_names, replace=False):
+    def _report_import_failure(self, kind, stage, exc, source="", target="", backup=""):
+        """Keep a copyable explanation visible and log the original exception."""
+        detail = format_import_failure(kind, stage, exc, source, target, backup)
+        self.set_runtime_error(f"{kind}导入失败", detail)
+        print(f"{kind}导入失败\n{detail}", file=sys.stderr, flush=True)
+        if exc.__traceback__ is not None:
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        category, advice = classify_import_failure(exc, stage)
+        QMessageBox.warning(
+            self, f"{kind}导入失败",
+            f"失败阶段：{stage}\n错误归类：{category}\n\n{advice}\n\n"
+            "请点击窗口底部的“错误详情”查看并复制完整信息。",
+        )
+
+    def _apply_class_names(self, class_names, replace=False, preserve_attributes=False):
         """Append or replace category definitions without changing annotations."""
         clean_names = []
         for class_name in class_names:
@@ -3348,7 +3405,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not clean_names:
             return []
 
-        if replace:
+        if replace and not preserve_attributes:
             previous_attributes = deepcopy(self.attribute_store._classes)
             try:
                 for old_name in list(self.class_list):
@@ -3357,6 +3414,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             except Exception:
                 self.attribute_store._classes = previous_attributes
                 raise
+        if replace:
             self.class_list.clear()
             self.classListWidget.clear_classes()
 
@@ -3370,7 +3428,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if added:
             item = self.classListWidget._class_items.get(added[0])
             if item:
-                self.classListWidget.treeWidget.setCurrentItem(item)
+                tree = self.classListWidget.treeWidget
+                blocked = tree.blockSignals(True)
+                try:
+                    tree.setCurrentItem(item)
+                finally:
+                    tree.blockSignals(blocked)
         return added
 
     def import_class_file(self):
@@ -3383,75 +3446,110 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         )
         if not file_path:
             return
-        class_names = self._read_class_names(file_path)
-        if not class_names:
-            DialogOver(self, "未读取到有效类别。类别文件应每行一个名称；以 # 开头的行会忽略。", "导入失败", "warning")
+        try:
+            class_names = self._read_class_names(file_path, strict=True)
+            if not class_names:
+                raise ValueError("未读取到有效类别。类别文件应每行一个名称；以 # 开头的行会忽略。")
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._report_import_failure("类别", "读取源文件", exc, source=file_path)
             return
 
-        shape_types = (RectShape, PolyShape, PolylineShape, PointShape, RotatedRectShape, PoseShape)
-        has_annotations = any(
-            isinstance(item, shape_types) and not getattr(item, "is_temp", False)
-            for item in self.scene.items()
-        )
-        annotation_dir = self.annotation_output_dir or self.current_dir
-        if annotation_dir:
-            has_annotations = has_annotations or any(
-                os.path.isfile(os.path.join(annotation_dir, stem + suffix))
-                for stem in self._dataset_image_stems()
-                for suffix in (".json", ".xml", ".txt", ".lines.txt")
-            )
         dialog = QMessageBox(self)
         dialog.setWindowTitle("导入类别文件")
         dialog.setIcon(QMessageBox.Question)
-        if has_annotations:
-            dialog.setText("当前图片已有标注。为避免类别编号与既有标注错位，只能追加新类别。")
-            append_button = dialog.addButton("追加类别", QMessageBox.AcceptRole)
-            dialog.addButton("取消", QMessageBox.RejectRole)
-            dialog.exec()
-            if dialog.clickedButton() != append_button:
-                return
+        dialog.setText("请选择导入方式。替换前会备份当前类别、属性配置及标注文件。")
+        dialog.setInformativeText("替换不会改写已有标注文件；YOLO 编号将按新类别顺序解释，JSON/XML 保留原类别名称。")
+        replace_button = dialog.addButton("替换当前类别", QMessageBox.DestructiveRole)
+        append_button = dialog.addButton("追加类别", QMessageBox.AcceptRole)
+        dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() == replace_button:
+            replace = True
+        elif dialog.clickedButton() == append_button:
             replace = False
         else:
-            dialog.setText("请选择导入方式。替换会移除当前类别及其专属属性定义。")
-            replace_button = dialog.addButton("替换当前类别", QMessageBox.DestructiveRole)
-            append_button = dialog.addButton("追加类别", QMessageBox.AcceptRole)
-            dialog.addButton("取消", QMessageBox.RejectRole)
-            dialog.exec()
-            if dialog.clickedButton() == replace_button:
-                replace = True
-            elif dialog.clickedButton() == append_button:
-                replace = False
-            else:
+            return
+
+        # An unchanged import must not rewrite metadata, create a marker, or
+        # take a new snapshot. Compare both the displayed list and the actual
+        # on-disk class order; YOLO numeric IDs depend on that order.
+        if not replace and all(name in self.class_list for name in class_names):
+            self.statusBar.showMessage("类别已存在，未修改或备份。", 10000)
+            QMessageBox.information(self, "类别未变化", "导入的类别均已存在，未修改或备份。")
+            return
+        if replace and self.current_dir and os.path.isdir(self.current_dir):
+            class_path = os.path.join(self.current_dir, "classes.txt")
+            try:
+                fingerprint = _retry_windows_sharing(file_fingerprint, class_path)
+                if fingerprint is not None:
+                    disk_names = _retry_windows_sharing(self._read_class_names, class_path, True)
+                    if _retry_windows_sharing(file_fingerprint, class_path) != fingerprint:
+                        raise RuntimeError("比较期间类别文件发生变化，请重试。")
+                    if class_names == self.class_list == disk_names:
+                        self.statusBar.showMessage("类别及顺序一致，未替换或备份。", 10000)
+                        QMessageBox.information(self, "类别未变化", "类别及顺序与当前项目一致，未替换或备份。")
+                        return
+            except Exception as exc:
+                self._report_import_failure("类别", "比较原配置", exc, file_path, class_path)
                 return
 
+        backup_path = ""
         if replace:
-            if not self._can_modify_attribute_schema() or not self._ensure_pending_annotation_saved():
+            if not self._ensure_pending_annotation_saved():
                 return
             try:
-                self._last_category_backup = self._backup_category_operation()
+                if not self.current_dir or not os.path.isdir(self.current_dir):
+                    raise FileNotFoundError("请先打开图片项目目录，以便备份类别、属性和标注文件。")
+                backup_path = self._backup_category_operation("类别替换")
+                if not backup_path:
+                    raise FileNotFoundError("请先打开图片项目目录，以便备份类别、属性和标注文件。")
+                self._last_category_backup = backup_path
             except Exception as exc:
-                QMessageBox.warning(self, "导入已取消", f"自动备份失败，未替换类别：\n{exc}")
+                self._report_import_failure("类别", "备份原配置", exc, file_path, self.current_dir)
                 return
         try:
-            added = self._apply_class_names(class_names, replace=replace)
+            if replace:
+                marker = os.path.join(self.current_dir, EXPLICIT_CLASS_LIST_FILE)
+                Exporter._atomic_write_text(marker, '{"version": 1}\n')
+                self._strict_class_list = True
+                self.classListWidget.retain_unlisted_annotations = True
+            added = self._apply_class_names(class_names, replace=replace, preserve_attributes=replace)
+            if replace and self.current_format in ("yolo", "curvelanes") and self.current_image_path and self.scene.img_item:
+                # These formats interpret a numeric ID (or no ID) using the
+                # current class list. Reload, without writing the sidecar, so
+                # the canvas immediately agrees with what will load later.
+                self.scene.clear_shapes()
+                self.load_annotations(self.current_image_path)
+                self.apply_class_colors_to_scene()
+                self.update_annotation_tree()
+                self.update_attribute_editor()
+                self._remember_current_annotation_signature()
+                self.undo_stack.clear()
+                self.redo_stack.clear()
+                self._undo_signatures.clear()
+                self._redo_signatures.clear()
+                self.push_state()
+                self.update_undo_redo_buttons()
         except Exception as exc:
-            QMessageBox.warning(
-                self, "类别导入未完成",
-                f"导入过程中保存失败，请检查项目文件及自动备份：\n{getattr(self, '_last_category_backup', '')}\n\n{exc}",
-            )
+            self._report_import_failure("类别", "保存类别", exc, file_path, self.current_dir, backup_path)
             return
         action = "替换" if replace else "追加"
-        DialogOver(self, f"已{action}类别文件：新增 {len(added)} 个类别。", "导入成功", "success")
+        message = f"已{action}类别文件：新增 {len(added)} 个类别。"
+        if backup_path:
+            self.statusBar.showMessage(f"类别已替换；备份：{backup_path}", 15000)
+            print(f"类别替换前的备份：{backup_path}", flush=True)
+            message += " 备份位于项目目录。"
+        DialogOver(self, message, "导入成功", "success")
 
     def import_attribute_file(self):
         """Import a schema file without removing automatic project loading.
 
-        Definitions are replaced only after validation and confirmation.  The
-        current schema is backed up first; existing per-shape JSON values are
+        Definitions are replaced after validation and a successful backup.
+        Existing per-shape JSON values are
         intentionally retained rather than silently pruned.
         """
-        if not self.current_dir:
-            DialogOver(self, "请先通过“打开目录”选择图片项目，再导入属性文件。", "未打开项目", "warning")
+        if not self.current_dir or not os.path.isdir(self.current_dir):
+            self._report_import_failure("属性", "准备项目", ValueError("尚未选择图片项目。"))
             return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -3462,70 +3560,92 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not file_path:
             return
         try:
-            with open(file_path, "r", encoding="utf-8-sig") as stream:
-                raw_schema = json.load(stream, parse_constant=_reject_json_constant)
+            raw_schema = _retry_windows_sharing(read_attribute_json, file_path)
+            if not isinstance(raw_schema, dict) or not any(key in raw_schema for key in ("global", "classes")):
+                raise ValueError("不是 JotMark 属性配置：根对象必须包含 global 或 classes。不要选择单张图片的标注 JSON。")
             # Validate through an isolated store so a malformed file never
             # changes the live project state.
             preview_store = ClassAttributeStore()
             preview = preview_store.replace_schema(raw_schema)
-        except (OSError, ValueError, TypeError) as exc:
-            DialogOver(self, f"属性文件无效，未作任何修改：\n{exc}", "导入失败", "warning")
+        except Exception as exc:
+            self._report_import_failure("属性", "读取或校验源文件", exc, source=file_path,
+                                        target=os.path.join(self.current_dir, ATTRIBUTE_SCHEMA_FILE))
             return
 
         target_path = os.path.join(self.current_dir, ATTRIBUTE_SCHEMA_FILE)
         backup_dir = ""
-        if os.path.isfile(target_path):
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_dir = os.path.join(
-                self.current_dir,
-                ".jotmark_backups",
-                f"attribute-schema-import-{timestamp}",
-            )
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("确认导入属性")
-            dialog.setIcon(QMessageBox.Warning)
-            dialog.setText("当前项目已有属性配置。导入会替换属性定义。")
-            dialog.setInformativeText(
-                f"导入文件：\n{file_path}\n\n"
-                f"将导入 {preview['global_count']} 个公共属性、"
-                f"{preview['class_count']} 个类别的专属属性。\n\n"
-                f"现有配置将自动备份到：\n{backup_dir}\n\n"
-                "已存在于标注 JSON 中的属性值不会自动删除；若新配置没有对应属性，"
-                "这些旧值会保留在 JSON 内但不会显示在表单中。"
-            )
-            proceed = dialog.addButton("备份并替换", QMessageBox.AcceptRole)
-            dialog.addButton("取消", QMessageBox.RejectRole)
-            dialog.exec()
-            if dialog.clickedButton() != proceed:
-                return
-            try:
-                os.makedirs(backup_dir, exist_ok=False)
-                shutil.copy2(target_path, os.path.join(backup_dir, ATTRIBUTE_SCHEMA_FILE))
-            except OSError as exc:
-                DialogOver(self, f"无法创建属性配置备份，导入已取消：\n{exc}", "导入失败", "warning")
-                return
+        try:
+            target_fingerprint = _retry_windows_sharing(file_fingerprint, target_path)
+            if target_fingerprint is not None:
+                current_store = self.attribute_store
+                same_project = (current_store.directory and
+                                os.path.normcase(os.path.abspath(current_store.directory)) == os.path.normcase(os.path.abspath(self.current_dir)))
+                if (not same_project or not current_store._fingerprint_known or
+                        current_store._disk_fingerprint != target_fingerprint):
+                    current_store = ClassAttributeStore()
+                    current_store.load(self.current_dir)
+                if not current_store.load_error and current_store.matches_import(raw_schema):
+                    if _retry_windows_sharing(file_fingerprint, target_path) != target_fingerprint:
+                        raise RuntimeError("比较期间属性文件发生变化，请重试。")
+                    if current_store is not self.attribute_store:
+                        self.attribute_store = current_store
+                        self.update_annotation_tree()
+                        self.update_attribute_editor()
+                    self.statusBar.showMessage("属性配置一致，未替换或备份。", 10000)
+                    QMessageBox.information(self, "属性未变化", "属性配置与当前项目一致，未替换或备份。")
+                    return
+                if not self._ensure_pending_annotation_saved():
+                    return
+                backup_dir = self._backup_category_operation("属性导入")
+                if not backup_dir:
+                    raise FileNotFoundError("项目目录不存在，无法备份原属性配置。")
+                backup_file = os.path.join(backup_dir, "project", ATTRIBUTE_SCHEMA_FILE)
+                if (_retry_windows_sharing(file_fingerprint, backup_file) != target_fingerprint
+                        or _retry_windows_sharing(file_fingerprint, target_path) != target_fingerprint):
+                    raise RuntimeError("备份期间原属性文件发生变化，导入已取消。")
+        except Exception as exc:
+            self._report_import_failure("属性", "备份原配置", exc, file_path, target_path, backup_dir)
+            return
 
         previous_schema_state = (deepcopy(self.attribute_store._global), deepcopy(self.attribute_store._classes),
-                                 deepcopy(self.attribute_store._document_metadata), self.attribute_store.load_error)
+                                 deepcopy(self.attribute_store._document_metadata), self.attribute_store.load_error,
+                                 self.attribute_store.directory, self.attribute_store._disk_fingerprint,
+                                 self.attribute_store._fingerprint_known)
         try:
+            self.attribute_store.directory = self.current_dir
+            self.attribute_store._disk_fingerprint = target_fingerprint
+            self.attribute_store._fingerprint_known = True
             self.attribute_store.replace_schema(raw_schema)
-            self.attribute_store.save()
-        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            _retry_windows_sharing(self.attribute_store.save)
+        except Exception as exc:
             (self.attribute_store._global, self.attribute_store._classes,
-             self.attribute_store._document_metadata, self.attribute_store.load_error) = previous_schema_state
-            DialogOver(self, f"属性配置写入失败：\n{exc}", "导入失败", "warning")
+             self.attribute_store._document_metadata, self.attribute_store.load_error,
+             self.attribute_store.directory, self.attribute_store._disk_fingerprint,
+             self.attribute_store._fingerprint_known) = previous_schema_state
+            self._report_import_failure("属性", "写入项目", exc, file_path, target_path, backup_dir)
             return
 
         self.update_annotation_tree()
         self.update_attribute_editor()
-        backup_message = f"\n旧配置备份：{backup_dir}" if backup_dir else ""
-        DialogOver(
-            self,
-            f"已导入 {preview['global_count']} 个公共属性、{preview['class_count']} 个类别属性定义。"
-            f"\n配置已保存为：{target_path}{backup_message}",
-            "属性导入成功",
-            "success",
-        )
+        message = f"已导入 {preview['global_count']} 个公共属性、{preview['class_count']} 个类别属性定义。"
+        if backup_dir:
+            message += " 旧配置已备份。"
+            self._last_attribute_import_backup = backup_dir
+            print(f"属性导入前的备份：{backup_dir}", flush=True)
+            self.statusBar.showMessage(f"属性已导入；备份：{backup_dir}", 15000)
+        else:
+            self.statusBar.showMessage(f"属性已添加：{target_path}", 15000)
+        unmatched_classes = sorted(name for name, nodes in preview_store._classes.items()
+                                   if nodes and name not in self.class_list)
+        if unmatched_classes:
+            names = "\n".join("• " + " ".join(name.split())[:80] for name in unmatched_classes[:5])
+            if len(unmatched_classes) > 5:
+                names += f"……（共 {len(unmatched_classes)} 个）"
+            message += " 部分类别暂不匹配，详情见状态栏。"
+            self.statusBar.setToolTip(f"属性已导入，但以下类别不在当前类别列表中：\n{names}\n\n选中具体标注后才能查看属性。")
+        else:
+            self.statusBar.setToolTip("")
+        DialogOver(self, message, "属性导入成功", "success")
 
     def open_category_conversion(self, selected_class=""):
         """Open the copy-on-write class/attribute migration tool.
@@ -3775,7 +3895,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self._ensure_pending_annotation_saved():
             return False
         try:
-            self._last_category_backup = self._backup_category_operation()
+            self._last_category_backup = self._backup_category_operation("属性修改")
             if scope == "global":
                 self.attribute_store.set_global_attributes(new_nodes)
                 saved_nodes = self.attribute_store.global_attributes()
@@ -4012,7 +4132,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 checked += 1
                 
         self.labelSelectedCount.setText(f"✓ {checked}/{total}")
-        self.labelSelectedCount.setToolTip(f"已选文件：{checked}/{total}")
+        self.labelSelectedCount.setToolTip(
+            f"已勾选文件：{checked}/{total}。勾选用于批量删除；YOLO 预测处理勾选的图片，"
+            "SAM 提示词提取在勾选多于一张时批量处理，否则处理当前图片。"
+            "勾选与当前查看的图片不同。"
+        )
         
         # 动态控制可用性
         has_items = total > 0
@@ -4038,6 +4162,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         total = self.listFiles.count()
         self.btnPreviousImage.setEnabled(current_idx > 0)
         self.btnNextImage.setEnabled(0 <= current_idx < total - 1)
+        # The selected row can temporarily differ from the actual image when
+        # switching is cancelled or a pending save fails. Show the image still
+        # on the canvas, not the attempted destination.
+        image_path = self.current_image_path
+        if not image_path or self._file_item_path(self.listFiles.currentItem()) != image_path:
+            current_idx = next((index for index in range(total)
+                                if image_path and self._file_item_path(self.listFiles.item(index)) == image_path), -1)
+        if current_idx < 0:
+            self.labelCurrentImagePosition.setText(f"—/{total}")
+            self.labelCurrentImagePosition.setToolTip(f"当前图片未在文件列表中；列表共 {total} 张")
+        else:
+            self.labelCurrentImagePosition.setText(f"{current_idx + 1}/{total}")
+            self.labelCurrentImagePosition.setToolTip(
+                f"当前图片是当前排序下第 {current_idx + 1} 张，共 {total} 张；与勾选数量无关"
+            )
 
     @staticmethod
     def _file_item_path(item):
@@ -4258,6 +4397,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if width != self.scene.annotation_line_width:
             self.scene.set_annotation_line_width(width)
             QSettings("luohuabuxiema", "JotMark").setValue("annotation_line_width", width)
+        diameter = dialog.vertex_diameter.value()
+        if diameter != self.scene.vertex_handle_diameter:
+            self.scene.set_vertex_handle_diameter(diameter)
+            QSettings("luohuabuxiema", "JotMark").setValue("vertex_handle_diameter", self.scene.vertex_handle_diameter)
+        close_hint = dialog.polygon_close_hint.isChecked()
+        close_scale = dialog.polygon_close_scale.value()
+        if (close_hint != self.scene.polygon_close_hint_enabled or
+                close_scale != self.scene.polygon_close_hint_scale):
+            self.scene.set_polygon_close_hint(close_hint, close_scale)
+            settings = QSettings("luohuabuxiema", "JotMark")
+            settings.setValue("polygon_close_hint_enabled", self.scene.polygon_close_hint_enabled)
+            settings.setValue("polygon_close_hint_scale", self.scene.polygon_close_hint_scale)
         show_attributes = dialog.canvas_attributes.isChecked()
         if show_attributes != self.scene.show_canvas_attributes:
             self.scene.show_canvas_attributes = show_attributes
@@ -4334,13 +4485,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         finally:
             self.listFiles.blockSignals(signals_were_blocked)
         self.labelAnnotatedCount.setText(f"● {annotated}/{total}")
-        self.labelAnnotatedCount.setToolTip(f"已标注图片：{annotated}/{total}")
+        self.labelAnnotatedCount.setToolTip(
+            f"存在同名标注文件的图片：{annotated}/{total}；文件存在不代表标注完整或已审核。"
+        )
 
     def open_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "选择图片目录", self.current_dir or "")
         if dir_path:
             if not self._ensure_pending_annotation_saved():
                 return
+            if os.path.abspath(dir_path) != os.path.abspath(self.current_dir or ""):
+                if not self._confirm_discard_in_progress_drawing():
+                    return
+                self.scene.cancel_drawing()
+                self._poly_redo_pts = []
             self.current_dir = dir_path
             self.load_classes(dir_path)
             self._rebuild_file_list(self._directory_image_paths(dir_path))
@@ -4525,6 +4683,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     moved_paths.append((source_path, destination))
 
                 if img_path == self.current_image_path:
+                    self.scene.cancel_drawing()
+                    self._poly_redo_pts = []
                     self.scene.clear_shapes()
                     if self.scene.img_item:
                         self.scene.removeItem(self.scene.img_item)
@@ -4590,10 +4750,29 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if reply == QMessageBox.Yes:
             self.delete_selected_files(checked_items)
 
+    def _confirm_discard_in_progress_drawing(self):
+        if not (self.scene.poly_pts or self.scene.drawing):
+            return True
+        return QMessageBox.question(
+            self, "尚有未完成的标注",
+            "当前正在绘制的标注尚未完成，切换图片或目录会放弃这些点。确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
     def on_file_selected(self, current, previous):
         self.update_image_navigation()
         if current and self._file_item_path(current) == self.current_image_path:
             return
+        if current and self.current_image_path:
+            if not self._confirm_discard_in_progress_drawing():
+                blocked = self.listFiles.blockSignals(True)
+                try:
+                    if previous and self.listFiles.row(previous) >= 0:
+                        self.listFiles.setCurrentItem(previous)
+                finally:
+                    self.listFiles.blockSignals(blocked)
+                self.update_image_navigation()
+                return
         if self.current_image_path and not self._ensure_pending_annotation_saved():
             blocked = self.listFiles.blockSignals(True)
             try:
@@ -4608,6 +4787,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             path = self._file_item_path(current)
             self.current_image_path = path
             self.scene.load_image(path)
+            self._poly_redo_pts = []
             self.view.reset_to_fit()
             self.load_annotations(path)
             self.apply_class_colors_to_scene()
@@ -4619,6 +4799,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self._undo_signatures.clear()
             self._redo_signatures.clear()
             self.push_state()
+            self.update_image_navigation()
             
             # 清除旧图片的骨架预览
             if hasattr(self.scene, 'pose_preview_item') and self.scene.pose_preview_item:
@@ -4744,7 +4925,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             archived = archive_annotation(out_path)
         else:
             archived = None
-            backup_previous_annotation(out_path)
+            _backup_previous_for_project(out_path, self.current_dir or (os.path.dirname(self.current_image_path) if self.current_image_path else None))
             if file_fingerprint(out_path) != self._annotation_disk_fingerprints[os.path.abspath(out_path)]:
                 raise RuntimeError(f"备份期间标注文件被其他程序修改，禁止覆盖：{out_path}")
             img_rect = self.scene.image_rect()
@@ -4794,6 +4975,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.update_annotation_status()
             return True
         except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
             self._set_save_failure(exc)
             return False
 
@@ -4873,7 +5055,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def _add_shape_to_scene(self, shape, label):
         """往画板内添加加载出来的轮廓并同步历史类别"""
-        if label not in self.class_list:
+        if label not in self.class_list and not self._strict_class_list:
             # self.class_list.append(label)
             # self.listClasses.addItem(label)
             self.add_class_to_list(label)
@@ -5196,6 +5378,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             print(f"标注文件已保存到: {out_path}")
             return True
         except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
             if format_type == self.current_format:
                 self._autosave_dirty = True
                 self._set_save_failure(exc)

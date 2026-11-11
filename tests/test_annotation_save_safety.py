@@ -1,6 +1,7 @@
 """Failure-injection tests for annotation persistence and recovery."""
 
 import json
+import io
 import os
 import tempfile
 import unittest
@@ -80,6 +81,29 @@ class AnnotationSaveSafetyTests(unittest.TestCase):
             self.assertEqual(len([s for s in self.win.scene.items() if getattr(s, "label", None) == "boundary"]), 1)
             self.assertFalse(self.win.close())
             self.assertEqual(self.win.current_image_path, str(self.image))
+
+    def test_autosave_failure_prints_traceback_and_retains_dirty_canvas(self):
+        self._polygon()
+        self.win.auto_save_annotation()
+        output = io.StringIO()
+        with patch("main.Exporter.save_json", side_effect=OSError("diagnostic disk failure")), \
+             patch("main.sys.stderr", output):
+            self.assertFalse(self.win._flush_auto_save_annotation())
+        self.assertIn("Traceback (most recent call last)", output.getvalue())
+        self.assertIn("OSError: diagnostic disk failure", output.getvalue())
+        self.assertTrue(self.win._autosave_dirty)
+        self.assertEqual(len([s for s in self.win.scene.items() if getattr(s, "label", None) == "boundary"]), 1)
+
+    def test_manual_save_failure_prints_traceback_and_retains_dirty_canvas(self):
+        self._polygon()
+        output = io.StringIO()
+        with patch("main.Exporter.save_json", side_effect=OSError("manual save failed")), \
+             patch("main.DialogOver"), patch("main.sys.stderr", output):
+            self.assertFalse(self.win.save_annotation("json"))
+        self.assertIn("Traceback (most recent call last)", output.getvalue())
+        self.assertIn("OSError: manual save failed", output.getvalue())
+        self.assertTrue(self.win._autosave_dirty)
+        self.assertEqual(len([s for s in self.win.scene.items() if getattr(s, "label", None) == "boundary"]), 1)
 
     def test_save_failure_reverts_file_selection(self):
         from PySide6.QtGui import QImage
@@ -193,7 +217,7 @@ class AnnotationSaveSafetyTests(unittest.TestCase):
         shape.attributes["visibility"] = ["uncertain"]
         self.win.auto_save_annotation()
         self.assertTrue(self.win._flush_auto_save_annotation())
-        previous = self.root / ".jotmark_backups" / "annotation-history" / "road.json.previous"
+        previous = self.root / "JotMark备份" / "annotation-history" / "road.json.previous"
         self.assertEqual(previous.read_bytes(), first)
         with patch("main.DialogOver"):
             self.assertTrue(self.win.save_annotation("json"))
@@ -233,6 +257,25 @@ class AnnotationSaveSafetyTests(unittest.TestCase):
             self.assertFalse(self.win._flush_auto_save_annotation())
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue(self.win._autosave_dirty)
+
+    def test_external_output_history_is_saved_under_image_project(self):
+        output = self.root / "external-output"
+        output.mkdir()
+        self.win.current_dir = str(self.root)
+        self.win.annotation_output_dir = str(output)
+        self._polygon()
+        self.win.auto_save_annotation()
+        self.assertTrue(self.win._flush_auto_save_annotation())
+        path = output / "road.json"
+        original = path.read_bytes()
+        shape = next(s for s in self.win.scene.items() if getattr(s, "label", None) == "boundary")
+        shape.attributes["visibility"] = ["uncertain"]
+        self.win.auto_save_annotation()
+        self.assertTrue(self.win._flush_auto_save_annotation())
+        backups = list((self.root / "JotMark备份" / "annotation-history").glob("外部标注_*/road.json.previous"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+        self.assertFalse((output / "JotMark备份").exists())
 
     def test_external_change_during_backup_is_not_overwritten(self):
         from jotmark.data.annotation_safety import backup_previous_annotation
@@ -573,7 +616,7 @@ class AnnotationSaveSafetyTests(unittest.TestCase):
         self.assertEqual(saved["shapes"][0]["attributes"], {"note": "keep"})
         self.assertEqual(saved["shapes"][0]["extra"], "keep")
         self.assertEqual(len(saved["shapes"]), 2)
-        previous = self.root / ".jotmark_backups" / "annotation-history" / "road.json.previous"
+        previous = self.root / "JotMark备份" / "annotation-history" / "road.json.previous"
         self.assertEqual(json.loads(previous.read_text(encoding="utf-8")), old)
 
     def test_sam_batch_json_append_preserves_existing_metadata(self):

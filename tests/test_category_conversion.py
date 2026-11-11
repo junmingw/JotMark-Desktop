@@ -54,17 +54,31 @@ class CategoryConversionTests(unittest.TestCase):
             {"label": "person", "shape_type": "point", "points": [], "attributes": {}},
         ]
         _make_project(source, ["car", "vehicle", "person"], schema, original_shapes)
+        old_backup = source / "JotMark备份_类别替换_2026-11-09_12-00-00_abc"
+        old_backup.mkdir()
+        (old_backup / "old.json").write_text("{}", encoding="utf-8")
+        legacy_root = source / ".jotmark_backups"
+        legacy_root.mkdir()
+        (legacy_root / "old.json").write_text("{}", encoding="utf-8")
         original_document = (source / "sample.json").read_text(encoding="utf-8")
 
         result = convert_category_to_category(source, self.tmp_path / "converted", "car", "vehicle")
 
         self.assertEqual((source / "sample.json").read_text(encoding="utf-8"), original_document)
         self.assertTrue(Path(result["backup_directory"]).is_dir())
+        self.assertEqual(Path(result["backup_directory"]).parent, source / "JotMark备份")
         self.assertEqual(
             (Path(result["backup_directory"]) / "sample.jpg").read_bytes(),
             b"not-a-real-image-but-must-be-backed-up",
         )
         self.assertTrue((Path(result["output_directory"]) / "sample.jpg").is_file())
+        self.assertFalse((Path(result["output_directory"]) / old_backup.name).exists())
+        self.assertFalse((Path(result["backup_directory"]) / old_backup.name).exists())
+        self.assertFalse((Path(result["backup_directory"]) / "JotMark备份").exists())
+        self.assertFalse((Path(result["backup_directory"]) / ".jotmark_backups").exists())
+        self.assertFalse((Path(result["output_directory"]) / "JotMark备份").exists())
+        self.assertFalse((Path(result["output_directory"]) / ".jotmark_backups").exists())
+        self.assertTrue((old_backup / "old.json").is_file())
         converted = _read_json(Path(result["output_directory"]) / "sample.json")
         converted_shape = converted["shapes"][0]
         self.assertEqual(converted_shape["label"], "vehicle")

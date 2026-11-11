@@ -31,5 +31,10 @@ venv/
 runs/
 datasets/
 
+# Project backups may contain private annotations and configurations.
+JotMark备份_*/
+JotMark备份/
+.jotmark_backups/
+
 # Generated when the examples directory is opened as a working annotation project
 examples/classes.txt

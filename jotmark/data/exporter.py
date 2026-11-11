@@ -242,7 +242,7 @@ class Exporter:
         lines = []
         for s in shapes:
             if s["label"] not in classes_list:
-                continue
+                raise ValueError(f"标注类别“{s['label']}”不在当前类别列表中，无法保存为 YOLO；请先为该标注选择现有类别。")
             class_id = classes_list.index(s["label"])
 
             if s["type"] == "rectangle":
